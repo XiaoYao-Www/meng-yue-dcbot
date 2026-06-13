@@ -4,11 +4,18 @@ FROM python:3.12-slim
 # 2. 設定工作目錄
 WORKDIR /app
 
-# 3. 複製專案的所有檔案進去（包含 pyproject.toml 和 main.py）
+# 3. 安裝最新版 Poetry (支援 Poetry 2.0+)
+RUN pip install --no-cache-dir poetry
+
+# 4. 複製依賴設定檔與 lock 檔
+COPY pyproject.toml poetry.lock* ./
+
+# 5. 設定 poetry 不要建立虛擬環境，並安裝依賴
+RUN poetry config virtualenvs.create false && \
+    poetry install --no-interaction --no-ansi --only main
+
+# 6. 複製其餘程式碼
 COPY . .
 
-# 4. 使用原生 pip 直接安裝當前目錄 (.)，它會自動解析 pyproject.toml 並安裝依賴
-RUN pip install --no-cache-dir .
-
-# 5. 啟動你的程式
+# 7. 啟動程式
 CMD ["python", "main.py"]
