@@ -87,6 +87,8 @@ class UserDatabase:
 
     async def get_users(self, order_by: str = "user_id", limit: Optional[int] = None, descending: bool = True) -> List[UserBaseRow]:
         """### 取得過濾/排序後的使用者資料"""
+        if self.db is None:
+            await self.connect()
         valid_columns = ["user_id", "xp", "coins", "reputation", "streak_count", "max_streak", "total_sign_in"]
         if order_by not in valid_columns:
             order_by = "user_id"

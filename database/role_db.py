@@ -53,6 +53,8 @@ class RoleConfigDatabase:
 
     async def get_all_configs(self) -> List[RoleConfigRow]:
         """### 取得所有身分組設定"""
+        if self.db is None:
+            await self.connect()
         try:
             async with self.db.execute("SELECT * FROM role_configs") as cursor:
                 rows = await cursor.fetchall()

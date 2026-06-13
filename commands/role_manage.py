@@ -28,6 +28,12 @@ class RoleManageCommand(commands.Cog):
                 return
 
             await roleConfigDB.add_config(role.id, reputation, sign_in_days)
+
+            # 刷新身分組快取
+            cog = self.bot.get_cog("RoleCheckEvent")
+            if cog and hasattr(cog, "refresh_cache"):
+                await cog.refresh_cache()
+
             conditions = []
             if reputation > 0:
                 conditions.append(f"聲望 ≥ `{reputation}`")
@@ -56,6 +62,12 @@ class RoleManageCommand(commands.Cog):
         """### 移除身分組設定"""
         try:
             await roleConfigDB.remove_config(role.id)
+
+            # 刷新身分組快取
+            cog = self.bot.get_cog("RoleCheckEvent")
+            if cog and hasattr(cog, "refresh_cache"):
+                await cog.refresh_cache()
+
             await interaction.response.send_message(
                 f"✅ 已移除 {role.mention} 的門檻設定。", ephemeral=True
             )
@@ -67,7 +79,6 @@ class RoleManageCommand(commands.Cog):
                 pass
 
     @app_commands.command(name="role_list", description="列出所有已設定的身分組門檻（管理員限定）")
-    @app_commands.default_permissions(administrator=True)
     async def role_list(self, interaction: Interaction):
         """### 列出所有身分組設定"""
         try:
@@ -81,6 +92,7 @@ class RoleManageCommand(commands.Cog):
                 color=discord.Color.blue(),
                 timestamp=discord.utils.utcnow()
             )
+            description_list = []
             for cfg in configs:
                 role_obj = interaction.guild.get_role(cfg["role_id"])
                 role_name = role_obj.mention if role_obj else f"`{cfg['role_id']}` (已刪除)"
@@ -90,11 +102,9 @@ class RoleManageCommand(commands.Cog):
                 if cfg["required_sign_in_days"] > 0:
                     parts.append(f"簽到 ≥ `{cfg['required_sign_in_days']}` 天")
                 value = " 且 ".join(parts) if parts else "未設定條件 (資料異常)"
-                embed.add_field(
-                    name=role_name,
-                    value=value,
-                    inline=False
-                )
+                description_list.append(f"{role_name}: {value}")
+            
+            embed.description = "\n".join(description_list)
 
             await interaction.response.send_message(embed=embed)
         except Exception as e:

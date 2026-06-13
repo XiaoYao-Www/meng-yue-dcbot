@@ -81,6 +81,12 @@ class OnMessageEvent(commands.Cog):
             word_count = min(count_readable_chars(message), MAX_MESSAGE_REPUTATION)
 
             await userBaseDB.update_user_stats(user_id, xp=word_count, reputation=word_count)
+
+            # 即時身分組檢查（單人）
+            if message.guild:
+                cog = self.bot.get_cog("RoleCheckEvent")
+                if cog and hasattr(cog, "check_single_user"):
+                    await cog.check_single_user(message.guild, user_id)
         except Exception as e:
             print(f"❌ on_message 處理錯誤: {e}")
 

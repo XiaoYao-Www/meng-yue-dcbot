@@ -53,6 +53,12 @@ class SignInEvent(commands.Cog):
             await userBaseDB.update_user_sign_in(user_id, new_streak)             # 更新簽到
             await userBaseDB.update_user_stats(user_id, xp=100, reputation=100)   # 增加經驗與聲望
 
+            # 即時身分組檢查（單人）
+            if message.guild:
+                cog = self.bot.get_cog("RoleCheckEvent")
+                if cog and hasattr(cog, "check_single_user"):
+                    await cog.check_single_user(message.guild, user_id)
+
             # 成功簽到，給表情符號
             self._today_cache.add(user_id)
             await message.add_reaction("🗓️")

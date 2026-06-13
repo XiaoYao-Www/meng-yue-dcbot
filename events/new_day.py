@@ -25,6 +25,11 @@ class NewDayEvent(commands.Cog):
             decay_count = await userBaseDB.apply_daily_decay(DAILY_REPUTATION_DECAY)
             print(f"✅ 聲望衰減完成：{decay_count} 人受影響")
 
+            # 2. 身分組完整掃描（衰減影響多人，全掃比多次單人檢查更高效）
+            cog = self.bot.get_cog("RoleCheckEvent")
+            if cog and hasattr(cog, "run_full_scan"):
+                await cog.run_full_scan()
+
         except Exception as e:
             print(f"❌ 執行每日任務失敗: {e}")
 
