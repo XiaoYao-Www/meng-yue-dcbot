@@ -78,7 +78,7 @@ class RoleManageCommand(commands.Cog):
             except:
                 pass
 
-    @app_commands.command(name="role_list", description="列出所有已設定的身分組門檻（管理員限定）")
+    @app_commands.command(name="role_list", description="列出所有已設定的身分組門檻")
     async def role_list(self, interaction: Interaction):
         """### 列出所有身分組設定"""
         try:
