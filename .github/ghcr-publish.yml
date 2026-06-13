@@ -1,0 +1,54 @@
+name: Publish Docker Image to GHCR
+
+# 觸發條件：當推送 'v' 開頭的標籤（例如 v1.0.0）時執行
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 定義環境變數
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    
+    # 【關鍵】賦予 GITHUB_TOKEN 寫入 Packages 的權限
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # 1. 取得專案程式碼
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. 登入 GitHub Container Registry
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 3. 自動擷取標籤與版本號 metadata
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      # 4. 建置並推送到 GHCR
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

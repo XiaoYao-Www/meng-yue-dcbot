@@ -1,0 +1,14 @@
+.venv
+.reasonix
+.codegraph
+.git
+.env
+.pytest_cache
+.vscode
+
+__pycache__
+poetry.lock
+*.pyc
+
+data
+reasonix.toml

@@ -1,0 +1,20 @@
+[project]
+name = "meng-yue"
+version = "0.1.2"
+description = ""
+authors = [
+    {name = "逍遙"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "discord-py (>=2.6.4,<3.0.0)",
+    "python-dotenv (>=1.2.1,<2.0.0)",
+    "emoji (>=2.15.0,<3.0.0)",
+    "aiosqlite (>=0.22.1,<0.23.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
