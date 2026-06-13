@@ -1,6 +1,9 @@
 # 1. 使用輕量化的 Python 3.12
 FROM python:3.12-slim
 
+# 強制讓 Python 即時輸出，不要暫存
+ENV PYTHONUNBUFFERED=1
+
 # 2. 設定工作目錄
 WORKDIR /app
 
