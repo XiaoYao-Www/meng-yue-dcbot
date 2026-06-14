@@ -7,6 +7,7 @@ from discord.ext import commands
 import importlib.util
 from database.user_base_db import userBaseDB
 from database.role_db import roleConfigDB
+from database.rpg_db import rpgSessionDB
 
 
 ##### 讀取設定 #####
@@ -82,6 +83,7 @@ class MyBot(commands.Bot):
         """
         await userBaseDB.close()
         await roleConfigDB.close()
+        await rpgSessionDB.close()
         print("🔄 資料庫連線已關閉")
         await super().close()
 
@@ -96,6 +98,8 @@ async def on_ready():
     await userBaseDB.setup()
     await roleConfigDB.connect()
     await roleConfigDB.setup()
+    await rpgSessionDB.connect()
+    await rpgSessionDB.setup()
     # 啟動完成
     print(f"{bot.user} 已上線！")
 
