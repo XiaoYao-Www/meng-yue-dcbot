@@ -33,6 +33,27 @@ class RoleConfigDatabase:
         """在應用關閉時呼叫"""
         if self.db:
             await self.db.close()
+            self.db = None
+
+    async def _ensure_connection(self) -> None:
+        """### 確保資料庫連線存活，若已斷則自動重連並重建表格
+        """
+        if self.db is None:
+            await self.connect()
+            await self.setup()
+            return
+
+        try:
+            async with self.db.execute("SELECT 1") as cursor:
+                await cursor.fetchone()
+        except Exception:
+            try:
+                await self.db.close()
+            except Exception:
+                pass
+            self.db = None
+            await self.connect()
+            await self.setup()
 
     async def setup(self) -> None:
         """初始化表格"""
@@ -53,8 +74,7 @@ class RoleConfigDatabase:
 
     async def get_all_configs(self) -> List[RoleConfigRow]:
         """### 取得所有身分組設定"""
-        if self.db is None:
-            await self.connect()
+        await self._ensure_connection()
         try:
             async with self.db.execute("SELECT * FROM role_configs") as cursor:
                 rows = await cursor.fetchall()
@@ -67,6 +87,7 @@ class RoleConfigDatabase:
 
     async def add_config(self, role_id: int, required_reputation: int, required_sign_in_days: int) -> None:
         """### 新增或更新身分組門檻"""
+        await self._ensure_connection()
         async with self._lock:
             await self.db.execute("""
                 INSERT INTO role_configs (role_id, required_reputation, required_sign_in_days)
@@ -79,6 +100,7 @@ class RoleConfigDatabase:
 
     async def remove_config(self, role_id: int) -> None:
         """### 移除身分組設定"""
+        await self._ensure_connection()
         async with self._lock:
             await self.db.execute("DELETE FROM role_configs WHERE role_id = ?", (role_id,))
             await self.db.commit()

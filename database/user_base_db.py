@@ -38,6 +38,27 @@ class UserDatabase:
         """在應用關閉時呼叫"""
         if self.db:
             await self.db.close()
+            self.db = None
+
+    async def _ensure_connection(self) -> None:
+        """### 確保資料庫連線存活，若已斷則自動重連並重建表格
+        """
+        if self.db is None:
+            await self.connect()
+            await self.setup()
+            return
+
+        try:
+            async with self.db.execute("SELECT 1") as cursor:
+                await cursor.fetchone()
+        except Exception:
+            try:
+                await self.db.close()
+            except Exception:
+                pass
+            self.db = None
+            await self.connect()
+            await self.setup()
 
     async def setup(self) -> None:
         """初始化表格 (請確保在呼叫此方法前，已經執行過 await db.connect())"""
@@ -73,6 +94,7 @@ class UserDatabase:
 
     async def get_user(self, user_id: int) -> UserBaseRow:
         """### 取得使用者資料"""
+        await self._ensure_connection()
         # 因為 _ensure_user 會進行 INSERT (寫入)，所以這裡需要加鎖
         async with self._lock:
             await self._ensure_user(user_id)
@@ -87,8 +109,7 @@ class UserDatabase:
 
     async def get_users(self, order_by: str = "user_id", limit: Optional[int] = None, descending: bool = True) -> List[UserBaseRow]:
         """### 取得過濾/排序後的使用者資料"""
-        if self.db is None:
-            await self.connect()
+        await self._ensure_connection()
         valid_columns = ["user_id", "xp", "coins", "reputation", "streak_count", "max_streak", "total_sign_in"]
         if order_by not in valid_columns:
             order_by = "user_id"
@@ -115,6 +136,7 @@ class UserDatabase:
 
     async def update_user_stats(self, user_id: int, xp: int = 0, coins: int = 0, reputation: int = 0) -> None:
         """### 更新使用者資料 (變動數值)"""
+        await self._ensure_connection()
         async with self._lock:  # 所有涉及變更 (UPDATE/INSERT) 的操作都必須鎖定
             await self._ensure_user(user_id)
             
@@ -129,6 +151,7 @@ class UserDatabase:
 
     async def set_user_stats(self, user_id: int, xp: Optional[int] = None, coins: Optional[int] = None, reputation: Optional[int] = None) -> None:
         """### 設定使用者資料 (強制設定數值)"""
+        await self._ensure_connection()
         updates = []
         params = []
         
@@ -161,6 +184,7 @@ class UserDatabase:
 
     async def update_user_sign_in(self, user_id: int, new_streak: int) -> None:
         """### 簽到更新"""
+        await self._ensure_connection()
         today = datetime.datetime.now(TZ).strftime('%Y-%m-%d')
         
         async with self._lock:
@@ -181,6 +205,7 @@ class UserDatabase:
         """### 全員聲望衰減
         Returns: 受影響的使用者數量
         """
+        await self._ensure_connection()
         async with self._lock:
             cursor = await self.db.execute("""
                 UPDATE users 
@@ -195,6 +220,7 @@ class UserDatabase:
         """### 將昨天沒簽到的人連續天數歸零
         Returns: 受影響的使用者數量
         """
+        await self._ensure_connection()
         yesterday = (datetime.datetime.now(TZ) - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
         today = datetime.datetime.now(TZ).strftime('%Y-%m-%d')
         

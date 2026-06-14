@@ -77,6 +77,14 @@ class MyBot(commands.Bot):
         except Exception as e:
             print(f"❌ 錯誤處理器自身異常: {e}")
 
+    async def close(self) -> None:
+        """### 完整關閉機器人（僅在 shutdown 時觸發，不會被 RESUME 干擾）
+        """
+        await userBaseDB.close()
+        await roleConfigDB.close()
+        print("🔄 資料庫連線已關閉")
+        await super().close()
+
 bot = MyBot(command_prefix="!", intents=intents)
 
 ##### 機器人啟動 #####
@@ -90,13 +98,6 @@ async def on_ready():
     await roleConfigDB.setup()
     # 啟動完成
     print(f"{bot.user} 已上線！")
-
-@bot.event
-async def on_disconnect():
-    """斷線時關閉資料庫連線"""
-    await userBaseDB.close()
-    await roleConfigDB.close()
-    print("🔄 資料庫連線已關閉")
 
 print("TOKEN loaded:", "✅" if TOKEN else "❌ MISSING")
 if TOKEN is None:
