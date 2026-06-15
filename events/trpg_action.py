@@ -13,7 +13,7 @@ from database.trpg_db import trpgDB
 # AI 客戶端
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 try:
     from openai import AsyncOpenAI
@@ -30,6 +30,12 @@ GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根
 ## 規則摘要
 {rules_summary}
 
+## 骰子規則
+{dice_rules_description}
+
+## 遊戲結束條件
+{end_conditions_text}
+
 ## 近期劇情紀錄（最新在前）
 {recent_narratives}
 
@@ -45,8 +51,10 @@ GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根
 ## 玩家行動
 {action}
 
-## D20 擲骰結果
-{d20_roll} / 20 → {result}
+## 擲骰結果
+使用骰子: {dice_used}
+擲骰結果: {d20_roll}
+判定: {result}
 
 ========================================
 請嚴格按照以下 JSON 格式回傳，不要包含任何其他文字：
@@ -54,10 +62,11 @@ GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根
 {{
     "narrative": "劇情敘述文字（100-300字，繁體中文，生動描寫行動結果）",
 
-    "stat_changes": {{
-        "hp": 0,
-        "san": 0
-    }},
+    "stat_changes": {{}},
+
+    "dice_used": "實際使用的骰子，如 D20、3D6、D100",
+
+    "end_game": false,
 
     "new_items": [],
 
@@ -65,14 +74,18 @@ GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根
 
     "dialogues": [],
 
-    "action_log": "此行動的簡短摘要（10-30字）"
+    "action_log": "此行動的簡短摘要（10-30字）",
+
+    "next_player_hint": "建議下一位行動的玩家角色名，或空白表示不指定"
 }}
 
 注意：
 - stat_changes 中的數值：正數=增加，負數=減少，0=不變
+- end_game：若本次行動觸發了遊戲結束條件，設為 true，否則 false
 - new_items 格式：{{"name": "道具名", "description": "描述", "properties": {{}}, "is_known": true}}
 - new_npcs 格式：{{"name": "NPC/怪物名", "description": "描述", "stats": {{"hp": 50}}, "is_hostile": false, "is_known": true}}
 - dialogues 格式：{{"speaker": "NPC名稱", "content": "對話內容"}}
+- **next_player_hint**：根據劇情發展建議誰該接著行動，若無特別需求設為空字串
 - 沒有新項目時，new_items / new_npcs / dialogues 保持空列表
 - 所有文字使用繁體中文"""
 
@@ -98,37 +111,87 @@ class TRPGD20Event(commands.Cog):
             game = await trpgDB.get_game_by_forum(forum_channel.id)
         except Exception:
             return
-        if game is None or game["current_stage"] == "創角":
+        if game is None or game["current_stage"] in ("創角", "結束"):
             return
 
         content = message.content.strip()
-        if not content.startswith("D20") and not content.startswith("d20"):
+
+        # D 指令匹配（僅 D / d 開頭，自動選骰）
+        is_dice = (
+            content.upper().startswith("D ") or
+            content.upper().startswith("D\t") or
+            content.upper() == "D"
+        )
+        is_speech = any(content.startswith(p) for p in ("說", "说", "講", "讲", "大喊", "私語", "私语", "say"))
+
+        if is_dice:
+            parts = content.split(None, 1)
+            action = parts[1].strip() if len(parts) > 1 else "執行行動"
+
+            # 自動從 world_rules.dice_rules.default 取得預設骰子
+            wr = {}
+            try:
+                wr = json.loads(game.get("world_rules", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                pass
+            dice_rules = wr.get("dice_rules", {})
+            if isinstance(dice_rules, dict):
+                dice_type = dice_rules.get("default", "D20")
+            else:
+                dice_type = "D20"
+
+            await self._process_action(message, thread, game, action, dice_type)
             return
 
-        action = content[3:].strip() if len(content) > 3 else "執行行動"
-        await self._process_action(message, thread, game, action)
+        if is_speech:
+            # 一般對話（不擲骰）
+            action = content
+            await self._process_action(message, thread, game, action, "對話")
+            return
 
     async def _process_action(
         self, message: Message, thread: discord.Thread,
-        game: dict, action: str
+        game: dict, action: str, dice_type: str = "D20"
     ) -> None:
         character = await trpgDB.get_character_by_discord(game["id"], message.author.id)
         if character is None:
             await message.reply("❌ 你沒有參與此遊戲，無法行動。", mention_author=False)
             return
 
-        # D20 擲骰
-        d20_roll = random.randint(1, 20)
-        if d20_roll == 20:
-            result = "大成功"
-        elif d20_roll >= 15:
-            result = "成功"
-        elif d20_roll >= 10:
-            result = "普通"
-        elif d20_roll >= 2:
-            result = "失敗"
+        # 擲骰（支援動態骰子類型）
+        is_dialogue = dice_type == "對話"
+        if is_dialogue:
+            d20_roll = 0
+            result = "對話"
+            dice_used = "-"
         else:
-            result = "大失敗"
+            # 解析骰子格式如 D20、2D6、D100、3D20
+            import re as _re
+            dice_match = _re.match(r"^(\d*)D(\d+)$", dice_type, _re.IGNORECASE)
+            if dice_match:
+                dice_count = int(dice_match.group(1)) if dice_match.group(1) else 1
+                dice_faces = int(dice_match.group(2))
+                if dice_count <= 1:
+                    d20_roll = random.randint(1, dice_faces)
+                else:
+                    # 多骰：回傳總和
+                    rolls = [random.randint(1, dice_faces) for _ in range(dice_count)]
+                    d20_roll = sum(rolls)
+                dice_used = dice_type.upper()
+            else:
+                d20_roll = random.randint(1, 20)
+                dice_used = "D20"
+
+            if d20_roll == 20 and dice_used in ("D20", "1D20"):
+                result = "大成功"
+            elif d20_roll >= 15:
+                result = "成功"
+            elif d20_roll >= 10:
+                result = "普通"
+            elif d20_roll >= 2:
+                result = "失敗"
+            else:
+                result = "大失敗"
 
         # 解析世界規則
         world_rules = {}
@@ -163,11 +226,23 @@ class TRPGD20Event(commands.Cog):
             for d in dialogues_list
         ) if dialogues_list else "（尚無對話）"
 
+        # 取得骰子規則與結束條件
+        dice_rules = world_rules.get("dice_rules", {})
+        dice_rules_desc = dice_rules.get("description", "D20 為預設骰子") if isinstance(dice_rules, dict) else "D20 為預設骰子"
+        end_conditions_list = []
+        try:
+            end_conditions_list = json.loads(game.get("end_conditions", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            pass
+        end_conditions_text = "\n".join(f"- {c}" for c in end_conditions_list) if end_conditions_list else "（無特殊結束條件）"
+
         # 構建 prompt
         rules_summary = world_rules.get("rules_summary", "無特殊規則，D20 判定。")
         prompt = GM_PROMPT_TEMPLATE.format(
             world_setting=game.get("world_setting", "未知的世界"),
             rules_summary=rules_summary,
+            dice_rules_description=dice_rules_desc,
+            end_conditions_text=end_conditions_text,
             recent_narratives=recent_narratives,
             recent_dialogues=recent_dialogues,
             character_name=character.get("name", message.author.display_name),
@@ -175,21 +250,28 @@ class TRPGD20Event(commands.Cog):
             character_status=character.get("status", "存活"),
             inventory=inv_str,
             action=action,
+            dice_used=dice_used if not is_dialogue else "對話",
             d20_roll=d20_roll,
             result=result,
         )
 
-        thinking_msg = await message.reply("🎲 擲骰中...", mention_author=False)
+        # 提示訊息
+        if is_dialogue:
+            thinking_msg = await message.reply("💬 對話中...", mention_author=False)
+        else:
+            thinking_msg = await message.reply(f"🎲 擲骰 {dice_used} → {d20_roll} ...", mention_author=False)
 
         # 呼叫 AI
         response_data = await self._call_ai(prompt, action, d20_roll, result, game["name"])
 
         narrative = response_data.get("narrative", "")
         stat_changes = response_data.get("stat_changes", {})
+        end_game = response_data.get("end_game", False)
         new_items = response_data.get("new_items", [])
         new_npcs = response_data.get("new_npcs", [])
         dialogues = response_data.get("dialogues", [])
         action_log = response_data.get("action_log", f"{action} → {result}")
+        next_hint = response_data.get("next_player_hint", "")
 
         # 更新角色數值
         if stat_changes:
@@ -199,57 +281,88 @@ class TRPGD20Event(commands.Cog):
                     char_stats[stat_key] = max(0, old_val + change)
             await trpgDB.update_character_stats(character["id"], json.dumps(char_stats, ensure_ascii=False))
 
-        # 建立新道具
+        # 建立/更新道具（去重：同名則更新 + 不開新貼文）
         for item_data in new_items:
             try:
-                item_id = await trpgDB.create_item(
-                    game_id=game["id"],
-                    name=item_data.get("name", "未知道具"),
-                    description=item_data.get("description", ""),
-                    properties=json.dumps(item_data.get("properties", {}), ensure_ascii=False),
-                    is_known=item_data.get("is_known", True),
-                )
+                item_name = item_data.get("name", "未知道具")
+                item_desc = item_data.get("description", "")
+                item_props = json.dumps(item_data.get("properties", {}), ensure_ascii=False)
+
+                existing_item = await trpgDB.get_item_by_name(game["id"], item_name)
+                if existing_item:
+                    # 已存在 → 更新描述，不開新貼文
+                    await trpgDB.update_item(existing_item["id"], item_desc, item_props)
+                    item_id = existing_item["id"]
+                else:
+                    # 不存在 → 新建 + 開貼文
+                    item_id = await trpgDB.create_item(
+                        game_id=game["id"],
+                        name=item_name,
+                        description=item_desc,
+                        properties=item_props,
+                        is_known=item_data.get("is_known", True),
+                    )
+                    if forum := thread.parent:
+                        try:
+                            item_thread, _ = await forum.create_thread(
+                                name=f"📦 {item_name}",
+                                content=f"**{item_name}**\n\n{item_desc}",
+                                reason=f"{game['name']} 新道具",
+                            )
+                            await trpgDB.update_item_thread(item_id, item_thread.id)
+                        except discord.HTTPException:
+                            pass
+
                 # 自動放入角色背包
                 await trpgDB.add_item_to_inventory(character["id"], item_id)
-
-                # 建立 Discord 子貼文
-                if forum := thread.parent:
-                    try:
-                        item_thread, _ = await forum.create_thread(
-                            name=f"📦 {item_data['name']}",
-                            content=f"**{item_data['name']}**\n\n{item_data.get('description', '')}",
-                            reason=f"{game['name']} 新道具",
-                        )
-                        await trpgDB.update_item_thread(item_id, item_thread.id)
-                    except discord.HTTPException:
-                        pass
             except Exception as e:
-                print(f"[AI GM] 建立道具失敗: {e}")
+                print(f"[AI GM] 建立/更新道具失敗: {e}")
 
-        # 建立新 NPC/怪物
+        # 建立/更新 NPC/怪物（去重：同名則更新內容與貼文）
         for npc_data in new_npcs:
             try:
-                npc_id = await trpgDB.create_npc(
-                    game_id=game["id"],
-                    name=npc_data.get("name", "未知"),
-                    description=npc_data.get("description", ""),
-                    stats=json.dumps(npc_data.get("stats", {}), ensure_ascii=False),
-                    is_hostile=npc_data.get("is_hostile", False),
-                    is_known=npc_data.get("is_known", True),
-                )
-                if forum := thread.parent:
-                    try:
-                        icon = "🦄" if npc_data.get("is_hostile") else "👤"
-                        npc_thread, _ = await forum.create_thread(
-                            name=f"{icon} {npc_data['name']}",
-                            content=f"**{npc_data['name']}**\n\n{npc_data.get('description', '')}",
-                            reason=f"{game['name']} 新NPC",
-                        )
-                        await trpgDB.update_npc_thread(npc_id, npc_thread.id)
-                    except discord.HTTPException:
-                        pass
+                npc_name = npc_data.get("name", "未知")
+                npc_desc = npc_data.get("description", "")
+                npc_stats = json.dumps(npc_data.get("stats", {}), ensure_ascii=False)
+                npc_hostile = npc_data.get("is_hostile", False)
+
+                existing_npc = await trpgDB.get_npc_by_name(game["id"], npc_name)
+                if existing_npc:
+                    # 已存在 → 更新描述/數值
+                    await trpgDB.update_npc(existing_npc["id"], npc_desc, npc_stats)
+                    # 若有現有貼文，編輯更新內容
+                    if existing_npc["discord_thread_id"]:
+                        try:
+                            npc_thread = thread.parent.get_thread(existing_npc["discord_thread_id"])
+                            if npc_thread:
+                                await npc_thread.edit(
+                                    name=f"{'🦄' if npc_hostile else '👤'} {npc_name}"
+                                )
+                        except (discord.NotFound, discord.HTTPException):
+                            pass
+                else:
+                    # 不存在 → 新建
+                    npc_id = await trpgDB.create_npc(
+                        game_id=game["id"],
+                        name=npc_name,
+                        description=npc_desc,
+                        stats=npc_stats,
+                        is_hostile=npc_hostile,
+                        is_known=npc_data.get("is_known", True),
+                    )
+                    if forum := thread.parent:
+                        try:
+                            icon = "🦄" if npc_hostile else "👤"
+                            npc_thread, _ = await forum.create_thread(
+                                name=f"{icon} {npc_name}",
+                                content=f"**{npc_name}**\n\n{npc_desc}",
+                                reason=f"{game['name']} 新NPC",
+                            )
+                            await trpgDB.update_npc_thread(npc_id, npc_thread.id)
+                        except discord.HTTPException:
+                            pass
             except Exception as e:
-                print(f"[AI GM] 建立NPC失敗: {e}")
+                print(f"[AI GM] 建立/更新NPC失敗: {e}")
 
         # 記錄對話（NPC 發言）
         for d in dialogues:
@@ -280,23 +393,33 @@ class TRPGD20Event(commands.Cog):
             result_state=result,
         )
 
+        # 遊戲結束偵測
+        if end_game:
+            await trpgDB.update_game_end(game["id"], "結束")
+            game_end_text = "\n\n🏁 **遊戲結束！** 本次行動觸發了遊戲結束條件。"
+        else:
+            game_end_text = ""
+
         # 回覆結果
         result_embed = discord.Embed(
             title=f"🎲 {message.author.display_name} 的行動判定",
-            color=discord.Color.gold(),
+            color=discord.Color.gold() if not end_game else discord.Color.red(),
             timestamp=discord.utils.utcnow(),
         )
         result_embed.add_field(name="🎯 行動", value=action, inline=False)
-        result_embed.add_field(name="🎲 擲骰", value=f"**{d20_roll}** / 20", inline=True)
+
+        if not is_dialogue:
+            result_embed.add_field(name="🎲 擲骰", value=f"**{dice_used}** → `{d20_roll}`", inline=True)
+
         result_embed.add_field(name="📊 判定", value=result, inline=True)
-        result_embed.add_field(name="📖 結果", value=narrative[:1024], inline=False)
+        result_embed.add_field(name="📖 結果", value=narrative[:1024] + game_end_text, inline=False)
 
         # 狀態變更
         changed = {k: v for k, v in stat_changes.items() if v != 0}
         if changed:
             status_lines = []
             for k, v in changed.items():
-                icon = "❤️" if k == "hp" else "🧠" if k == "san" else "📊"
+                icon = "❤️" if "hp" in k.lower() or "生命" in k else "🧠" if "san" in k.lower() or "理智" in k or "意志" in k else "📊"
                 status_lines.append(f"{icon} {k}: {v:+d}")
             result_embed.add_field(name="📊 狀態變更", value="\n".join(status_lines), inline=False)
 
@@ -307,6 +430,10 @@ class TRPGD20Event(commands.Cog):
                 value="\n".join(f"• {it['name']}" for it in new_items),
                 inline=False,
             )
+
+        # 回合引導
+        if next_hint:
+            result_embed.add_field(name="👤 輪到誰？", value=next_hint, inline=False)
 
         await thinking_msg.edit(content=None, embed=result_embed)
 
@@ -365,6 +492,7 @@ class TRPGD20Event(commands.Cog):
             "new_npcs": [],
             "dialogues": [],
             "action_log": f"{action} → {result}",
+            "next_player_hint": "",
         }
 
     @staticmethod

@@ -3,7 +3,7 @@ from discord import app_commands, Interaction, CategoryChannel
 from discord.ext import commands
 from config import RPG_CLASS_ID, RPG_ROLE_ID
 from database.trpg_db import trpgDB
-from events.trpg_world_gen import generate_world
+from events.trpg_world_gen import generate_world, WorldGenError
 
 
 class RpgStartCommand(commands.Cog):
@@ -131,9 +131,19 @@ class RpgStartCommand(commands.Cog):
 
             # 呼叫 AI 生成世界觀與規則
             await interaction.followup.send("🌍 AI 正在生成世界觀與規則，請稍候...", ephemeral=True)
-            world_setting, world_rules_str, ai_final_goal = await generate_world(
-                game_id, name, story_outline, goal_type.value
-            )
+            try:
+                world_setting, world_rules_str, ai_final_goal, end_conditions_str = await generate_world(
+                    game_id, name, story_outline, goal_type.value
+                )
+            except WorldGenError as e:
+                await interaction.followup.send(
+                    f"❌ 世界生成失敗：{e}\n\n遊戲已被建立但缺少世界設定，請聯絡管理員檢查 AI 設定後重試。",
+                    ephemeral=True
+                )
+                world_setting = "（AI 生成失敗）"
+                world_rules_str = "{}"
+                ai_final_goal = ""
+                end_conditions_str = "[]"
             effective_final_goal = final_goal or ai_final_goal
 
             # 更新主貼文：加入世界觀資訊

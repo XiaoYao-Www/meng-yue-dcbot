@@ -17,6 +17,7 @@ class GameRow(TypedDict):
     world_state_summary: str    # 記憶壓縮摘要
     narrative_context: str      # 劇情上下文（用於 prompt 節省 token）
     final_goal: str              # 遊戲最終目標（AI 生成後不可變更）
+    end_conditions: str          # JSON 陣列：遊戲結束條件
     forum_channel_id: int
     main_thread_id: int
     owner_id: int
@@ -161,6 +162,7 @@ class TRPGDatabase:
                     world_state_summary TEXT NOT NULL DEFAULT '',
                     narrative_context   TEXT NOT NULL DEFAULT '',
                     final_goal           TEXT NOT NULL DEFAULT '',
+                    end_conditions        TEXT NOT NULL DEFAULT '[]',
                     forum_channel_id    INTEGER NOT NULL,
                     main_thread_id      INTEGER NOT NULL,
                     owner_id            INTEGER NOT NULL,
@@ -264,8 +266,33 @@ class TRPGDatabase:
                     created_at        TEXT NOT NULL,
                     FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
                 );
+
             """)
             await self.db.commit()
+
+        # migration: 舊 games 表可能缺少新欄位
+        for col, col_def in [
+            ("final_goal", "TEXT NOT NULL DEFAULT ''"),
+            ("end_conditions", "TEXT NOT NULL DEFAULT '[]'"),
+        ]:
+            try:
+                async with self._lock:
+                    await self.db.execute(f"ALTER TABLE games ADD COLUMN {col} {col_def}")
+                    await self.db.commit()
+            except Exception:
+                pass  # 欄位已存在
+
+        # migration: 舊 characters 表可能缺少新欄位
+        for col, col_def in [
+            ("creation_step", "INTEGER NOT NULL DEFAULT 0"),
+            ("current_location_id", "INTEGER NOT NULL DEFAULT 0"),
+        ]:
+            try:
+                async with self._lock:
+                    await self.db.execute(f"ALTER TABLE characters ADD COLUMN {col} {col_def}")
+                    await self.db.commit()
+            except Exception:
+                pass  # 欄位已存在
 
     ########################################################################
     # Game CRUD
@@ -326,13 +353,13 @@ class TRPGDatabase:
             await self.db.execute("UPDATE games SET current_stage = ? WHERE id = ?", (stage, game_id))
             await self.db.commit()
 
-    async def update_game_world(self, game_id: int, world_setting: str, world_rules: str, final_goal: str = "") -> None:
+    async def update_game_world(self, game_id: int, world_setting: str, world_rules: str, final_goal: str = "", end_conditions: str = "[]") -> None:
         """### 更新 AI 生成的世界觀與規則"""
         await self._ensure_connection()
         async with self._lock:
             await self.db.execute(
-                "UPDATE games SET world_setting = ?, world_rules = ?, final_goal = ? WHERE id = ?",
-                (world_setting, world_rules, final_goal, game_id)
+                "UPDATE games SET world_setting = ?, world_rules = ?, final_goal = ?, end_conditions = ? WHERE id = ?",
+                (world_setting, world_rules, final_goal, end_conditions, game_id)
             )
             await self.db.commit()
 
@@ -564,6 +591,29 @@ class TRPGDatabase:
             print(f"[TRPGDB] get_items_by_owner error: {e}")
             return []
 
+    async def get_item_by_name(self, game_id: int, name: str) -> Optional[ItemRow]:
+        """### 依名稱查詢道具（去重用）"""
+        await self._ensure_connection()
+        try:
+            async with self.db.execute(
+                "SELECT * FROM items WHERE game_id = ? AND name = ?", (game_id, name)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return cast(ItemRow, dict(row)) if row else None
+        except Exception as e:
+            print(f"[TRPGDB] get_item_by_name error: {e}")
+            return None
+
+    async def update_item(self, item_id: int, description: str, properties: str) -> None:
+        """### 更新道具描述與屬性"""
+        await self._ensure_connection()
+        async with self._lock:
+            await self.db.execute(
+                "UPDATE items SET description = ?, properties = ? WHERE id = ?",
+                (description, properties, item_id)
+            )
+            await self.db.commit()
+
     async def update_item_thread(self, item_id: int, thread_id: int) -> None:
         await self._ensure_connection()
         async with self._lock:
@@ -608,6 +658,29 @@ class TRPGDatabase:
         async with self._lock:
             await self.db.execute(
                 "UPDATE npcs SET discord_thread_id = ? WHERE id = ?", (thread_id, npc_id)
+            )
+            await self.db.commit()
+
+    async def get_npc_by_name(self, game_id: int, name: str) -> Optional[NPCRow]:
+        """### 依名稱查詢 NPC/怪物（去重用）"""
+        await self._ensure_connection()
+        try:
+            async with self.db.execute(
+                "SELECT * FROM npcs WHERE game_id = ? AND name = ?", (game_id, name)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return cast(NPCRow, dict(row)) if row else None
+        except Exception as e:
+            print(f"[TRPGDB] get_npc_by_name error: {e}")
+            return None
+
+    async def update_npc(self, npc_id: int, description: str, stats: str) -> None:
+        """### 更新 NPC 描述與數值"""
+        await self._ensure_connection()
+        async with self._lock:
+            await self.db.execute(
+                "UPDATE npcs SET description = ?, stats = ? WHERE id = ?",
+                (description, stats, npc_id)
             )
             await self.db.commit()
 
