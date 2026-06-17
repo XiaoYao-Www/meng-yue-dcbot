@@ -1,25 +1,20 @@
-import asyncio
 import json
-import os
 import random
-import re
 
 import discord
 from discord import Message
 from discord.ext import commands
 
 from database.trpg_db import trpgDB
-
-# AI 客戶端
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-v4-flash"
-
-try:
-    from openai import AsyncOpenAI
-    _ai_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL) if DEEPSEEK_API_KEY else None
-except ImportError:
-    _ai_client = None
+from utils.trpg_ai_client import get_ai_client, parse_json_response, call_ai
+from utils.trpg_dice import (
+    normalize_dice_rules,
+    get_default_dice,
+    roll_dice,
+    calc_dice_range,
+    judge_result,
+    format_dice_rules_for_prompt,
+)
 
 
 GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根據以下完整遊戲狀態，對玩家的行動進行判定與回應。
@@ -53,8 +48,8 @@ GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根
 
 ## 擲骰結果
 使用骰子: {dice_used}
-擲骰結果: {d20_roll}
-判定: {result}
+擲骰結果: {dice_roll}
+判定描述: {result}
 
 ========================================
 請嚴格按照以下 JSON 格式回傳，不要包含任何其他文字：
@@ -82,7 +77,7 @@ GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根
 注意：
 - stat_changes 中的數值：正數=增加，負數=減少，0=不變
 - end_game：若本次行動觸發了遊戲結束條件，設為 true，否則 false
-- new_items 格式：{{"name": "道具名", "description": "描述", "properties": {{}}, "is_known": true}}
+- new_items 格式：{{"name": "道具名", "count": 1, "description": "描述", "properties": {{}}, "is_known": true}}
 - new_npcs 格式：{{"name": "NPC/怪物名", "description": "描述", "stats": {{"hp": 50}}, "is_hostile": false, "is_known": true}}
 - dialogues 格式：{{"speaker": "NPC名稱", "content": "對話內容"}}
 - **next_player_hint**：根據劇情發展建議誰該接著行動，若無特別需求設為空字串
@@ -90,7 +85,13 @@ GM_PROMPT_TEMPLATE = """你是一個 TRPG 遊戲主持人 (Game Master)。請根
 - 所有文字使用繁體中文"""
 
 
-class TRPGD20Event(commands.Cog):
+class TRPGActionEvent(commands.Cog):
+    """### TRPG 行動判定事件
+
+    監聽論壇頻道中的 D 指令與對話指令，自動選擇骰子並呼叫 AI GM 判定。
+    骰子完全由 world_rules.dice_rules 驅動，無硬編碼。
+    """
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
@@ -128,17 +129,14 @@ class TRPGD20Event(commands.Cog):
             parts = content.split(None, 1)
             action = parts[1].strip() if len(parts) > 1 else "執行行動"
 
-            # 自動從 world_rules.dice_rules.default 取得預設骰子
+            # 從 world_rules.dice_rules 自動選擇預設骰子
             wr = {}
             try:
                 wr = json.loads(game.get("world_rules", "{}"))
             except (json.JSONDecodeError, TypeError):
                 pass
-            dice_rules = wr.get("dice_rules", {})
-            if isinstance(dice_rules, dict):
-                dice_type = dice_rules.get("default", "D20")
-            else:
-                dice_type = "D20"
+            dice_rules = normalize_dice_rules(wr.get("dice_rules"))
+            dice_type = get_default_dice(dice_rules)
 
             await self._process_action(message, thread, game, action, dice_type)
             return
@@ -151,47 +149,26 @@ class TRPGD20Event(commands.Cog):
 
     async def _process_action(
         self, message: Message, thread: discord.Thread,
-        game: dict, action: str, dice_type: str = "D20"
+        game: dict, action: str, dice_type: str = ""
     ) -> None:
+        """### 處理玩家行動（擲骰判定 + AI GM 回應）"""
         character = await trpgDB.get_character_by_discord(game["id"], message.author.id)
         if character is None:
             await message.reply("❌ 你沒有參與此遊戲，無法行動。", mention_author=False)
             return
 
-        # 擲骰（支援動態骰子類型）
+        # 擲骰（完全由 dice_type 驅動，無 D20 硬編碼）
         is_dialogue = dice_type == "對話"
         if is_dialogue:
-            d20_roll = 0
+            dice_roll = 0
             result = "對話"
             dice_used = "-"
+            dice_count = 0
+            dice_faces = 0
         else:
-            # 解析骰子格式如 D20、2D6、D100、3D20
-            import re as _re
-            dice_match = _re.match(r"^(\d*)D(\d+)$", dice_type, _re.IGNORECASE)
-            if dice_match:
-                dice_count = int(dice_match.group(1)) if dice_match.group(1) else 1
-                dice_faces = int(dice_match.group(2))
-                if dice_count <= 1:
-                    d20_roll = random.randint(1, dice_faces)
-                else:
-                    # 多骰：回傳總和
-                    rolls = [random.randint(1, dice_faces) for _ in range(dice_count)]
-                    d20_roll = sum(rolls)
-                dice_used = dice_type.upper()
-            else:
-                d20_roll = random.randint(1, 20)
-                dice_used = "D20"
-
-            if d20_roll == 20 and dice_used in ("D20", "1D20"):
-                result = "大成功"
-            elif d20_roll >= 15:
-                result = "成功"
-            elif d20_roll >= 10:
-                result = "普通"
-            elif d20_roll >= 2:
-                result = "失敗"
-            else:
-                result = "大失敗"
+            dice_roll, dice_count, dice_faces = roll_dice(dice_type)
+            dice_used = dice_type.upper()
+            result = judge_result(dice_roll, dice_count, dice_faces)
 
         # 解析世界規則
         world_rules = {}
@@ -226,18 +203,25 @@ class TRPGD20Event(commands.Cog):
             for d in dialogues_list
         ) if dialogues_list else "（尚無對話）"
 
-        # 取得骰子規則與結束條件
-        dice_rules = world_rules.get("dice_rules", {})
-        dice_rules_desc = dice_rules.get("description", "D20 為預設骰子") if isinstance(dice_rules, dict) else "D20 為預設骰子"
+        # 骰子規則描述（格式化為 AI GM 可讀）
+        dice_rules = normalize_dice_rules(world_rules.get("dice_rules"))
+        dice_rules_desc = format_dice_rules_for_prompt(dice_rules)
+
+        # 結束條件
         end_conditions_list = []
         try:
             end_conditions_list = json.loads(game.get("end_conditions", "[]"))
         except (json.JSONDecodeError, TypeError):
             pass
+        # 向後相容：若 DB 專用欄位為空，嘗試從 world_rules 內部讀取（舊遊戲）
+        if not end_conditions_list:
+            ec = world_rules.get("end_conditions", [])
+            if isinstance(ec, list):
+                end_conditions_list = ec
         end_conditions_text = "\n".join(f"- {c}" for c in end_conditions_list) if end_conditions_list else "（無特殊結束條件）"
 
         # 構建 prompt
-        rules_summary = world_rules.get("rules_summary", "無特殊規則，D20 判定。")
+        rules_summary = world_rules.get("rules_summary", "")
         prompt = GM_PROMPT_TEMPLATE.format(
             world_setting=game.get("world_setting", "未知的世界"),
             rules_summary=rules_summary,
@@ -251,7 +235,7 @@ class TRPGD20Event(commands.Cog):
             inventory=inv_str,
             action=action,
             dice_used=dice_used if not is_dialogue else "對話",
-            d20_roll=d20_roll,
+            dice_roll=dice_roll,
             result=result,
         )
 
@@ -259,10 +243,10 @@ class TRPGD20Event(commands.Cog):
         if is_dialogue:
             thinking_msg = await message.reply("💬 對話中...", mention_author=False)
         else:
-            thinking_msg = await message.reply(f"🎲 擲骰 {dice_used} → {d20_roll} ...", mention_author=False)
+            thinking_msg = await message.reply(f"🎲 擲骰 {dice_used} → {dice_roll} ...", mention_author=False)
 
         # 呼叫 AI
-        response_data = await self._call_ai(prompt, action, d20_roll, result, game["name"])
+        response_data = await self._call_ai(prompt, action, dice_roll, result, game["name"])
 
         narrative = response_data.get("narrative", "")
         stat_changes = response_data.get("stat_changes", {})
@@ -366,7 +350,6 @@ class TRPGD20Event(commands.Cog):
 
         # 記錄對話（NPC 發言）
         for d in dialogues:
-            # 先找或建立 NPC character（簡化：直接記錄到 dialogue 表）
             await trpgDB.add_dialogue(
                 game_id=game["id"],
                 character_id=character["id"],
@@ -388,7 +371,7 @@ class TRPGD20Event(commands.Cog):
         await trpgDB.add_action_log(
             game_id=game["id"],
             actor_id=character["id"],
-            action_type="D20",
+            action_type="dice_action",
             content=action,
             result_state=result,
         )
@@ -409,7 +392,7 @@ class TRPGD20Event(commands.Cog):
         result_embed.add_field(name="🎯 行動", value=action, inline=False)
 
         if not is_dialogue:
-            result_embed.add_field(name="🎲 擲骰", value=f"**{dice_used}** → `{d20_roll}`", inline=True)
+            result_embed.add_field(name="🎲 擲骰", value=f"**{dice_used}** → `{dice_roll}`", inline=True)
 
         result_embed.add_field(name="📊 判定", value=result, inline=True)
         result_embed.add_field(name="📖 結果", value=narrative[:1024] + game_end_text, inline=False)
@@ -437,28 +420,31 @@ class TRPGD20Event(commands.Cog):
 
         await thinking_msg.edit(content=None, embed=result_embed)
 
-    async def _call_ai(self, prompt: str, action: str, d20_roll: int, result: str, game_name: str) -> dict:
+    async def _call_ai(self, prompt: str, action: str, dice_roll: int, result: str, game_name: str) -> dict:
         """### 呼叫 AI 並解析回應"""
-        if not _ai_client:
+        client = get_ai_client()
+        if not client:
+            import asyncio
             await asyncio.sleep(0.3)
-            return self._fallback_response(action, d20_roll, result)
+            return self._fallback_response(action, dice_roll, result)
 
         try:
-            response = await _ai_client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
+            raw = await call_ai(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.8,
                 max_tokens=1200,
                 timeout=60,
             )
-            raw = response.choices[0].message.content.strip()
-            parsed = self._parse_json(raw)
+            if raw is None:
+                return self._fallback_response(action, dice_roll, result)
+
+            parsed = parse_json_response(raw)
             if parsed and "narrative" in parsed:
                 return parsed
-            return self._fallback_response(action, d20_roll, result)
+            return self._fallback_response(action, dice_roll, result)
         except Exception as e:
             print(f"[AI GM] API 錯誤: {e}")
-            return self._fallback_response(action, d20_roll, result)
+            return self._fallback_response(action, dice_roll, result)
 
     def _fallback_response(self, action: str, roll: int, result: str) -> dict:
         """### AI 不可用時的 fallback"""
@@ -495,27 +481,6 @@ class TRPGD20Event(commands.Cog):
             "next_player_hint": "",
         }
 
-    @staticmethod
-    def _parse_json(raw: str) -> dict | None:
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-        brace_start = raw.find("{")
-        brace_end = raw.rfind("}")
-        if brace_start != -1 and brace_end != -1:
-            try:
-                return json.loads(raw[brace_start:brace_end + 1])
-            except json.JSONDecodeError:
-                pass
-        return None
-
 
 async def setup(bot: commands.Bot):
-    await bot.add_cog(TRPGD20Event(bot))
+    await bot.add_cog(TRPGActionEvent(bot))

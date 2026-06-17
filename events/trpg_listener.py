@@ -7,16 +7,7 @@ from discord import Message
 from discord.ext import commands
 
 from database.trpg_db import trpgDB
-
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
-DEEPSEEK_MODEL = "deepseek-flash"
-
-try:
-    from openai import AsyncOpenAI
-    _ai_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL) if DEEPSEEK_API_KEY else None
-except ImportError:
-    _ai_client = None
+from utils.trpg_ai_client import get_ai_client, parse_json_response, call_ai, DEEPSEEK_MODEL
 
 
 OPENING_PROMPT = """你是這個 TRPG 世界的遊戲主持人。遊戲即將開始，請生成開場敘事。
@@ -153,7 +144,7 @@ class TRPGListener(commands.Cog):
         )
 
         wr = self._parse_world_rules(game)
-        rules_summary = wr.get("rules_summary", "D20 判定系統")
+        rules_summary = wr.get("rules_summary", "自訂判定系統")
 
         # AI 生成開場
         opening_text, first_player, hint = await self._generate_opening(
@@ -179,7 +170,8 @@ class TRPGListener(commands.Cog):
 
     async def _generate_opening(self, game: dict, players_info: str, rules_summary: str) -> tuple[str, str, str]:
         """AI 生成開場敘事，回傳 (opening, first_player, hint)"""
-        if not _ai_client:
+        client = get_ai_client()
+        if not client:
             return (
                 f"**{game['name']}** 的冒險正式展開！\n\n{game.get('world_setting', '')[:500]}\n\n準備好開始你的旅程。",
                 "", ""
@@ -193,13 +185,14 @@ class TRPGListener(commands.Cog):
             rules_summary=rules_summary,
         )
         try:
-            response = await _ai_client.chat.completions.create(
-                model=DEEPSEEK_MODEL,
+            raw = await call_ai(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.9, max_tokens=1000, timeout=45,
             )
-            raw = response.choices[0].message.content.strip()
-            parsed = self._parse_json(raw)
+            if raw is None:
+                return (f"**{game['name']}** 的冒險正式展開！\n\n{game.get('world_setting', '')[:500]}", "", "")
+
+            parsed = parse_json_response(raw)
             if parsed:
                 return (
                     parsed.get("opening", ""),
@@ -259,7 +252,7 @@ class TRPGListener(commands.Cog):
             return
         if character["discord_user_id"] != message.author.id:
             return
-        if character["name"]:
+        if character.get("creation_step", 0) >= 4:
             return
 
         content = message.content.strip()
@@ -286,7 +279,8 @@ class TRPGListener(commands.Cog):
         options = step_info.get("options", [])
         options_text = "\n".join(f"• {o['name']} — {o.get('description', '')}" for o in options) if options else "（請描述你想扮演的角色）"
 
-        if not _ai_client:
+        client = get_ai_client()
+        if not client:
             return self._fallback_step_intro(player_name, step_info, options_text)
 
         prompt = STEP_PROMPTS["step_intro"].format(
@@ -297,12 +291,13 @@ class TRPGListener(commands.Cog):
             player_name=player_name,
         )
         try:
-            resp = await _ai_client.chat.completions.create(
-                model=DEEPSEEK_MODEL, messages=[{"role": "user", "content": prompt}],
+            raw = await call_ai(
+                messages=[{"role": "user", "content": prompt}],
                 temperature=0.8, max_tokens=800, timeout=30,
             )
-            text = resp.choices[0].message.content.strip()
-            return text if text else self._fallback_step_intro(player_name, step_info, options_text)
+            if raw:
+                return raw
+            return self._fallback_step_intro(player_name, step_info, options_text)
         except Exception:
             return self._fallback_step_intro(player_name, step_info, options_text)
 
@@ -326,7 +321,8 @@ class TRPGListener(commands.Cog):
             next_info = steps[next_step]
             next_options = next_info.get("options", [])
             next_options_text = "\n".join(f"• {o['name']} — {o.get('description', '')}" for o in next_options) if next_options else "（請描述）"
-            if _ai_client:
+            client = get_ai_client()
+            if client:
                 prompt = STEP_PROMPTS["step_intro"].format(
                     world_setting=game.get("world_setting", ""),
                     step_field=next_info.get("field", "下一步"),
@@ -335,11 +331,11 @@ class TRPGListener(commands.Cog):
                     player_name=message.author.display_name,
                 )
                 try:
-                    resp = await _ai_client.chat.completions.create(
-                        model=DEEPSEEK_MODEL, messages=[{"role": "user", "content": prompt}],
+                    raw = await call_ai(
+                        messages=[{"role": "user", "content": prompt}],
                         temperature=0.8, max_tokens=800, timeout=30,
                     )
-                    guide = resp.choices[0].message.content.strip() or self._fallback_step_intro(message.author.display_name, next_info, next_options_text)
+                    guide = raw or self._fallback_step_intro(message.author.display_name, next_info, next_options_text)
                 except Exception:
                     guide = self._fallback_step_intro(message.author.display_name, next_info, next_options_text)
             else:
@@ -357,21 +353,24 @@ class TRPGListener(commands.Cog):
         world_rules_str = game.get("world_rules", "{}")
         all_choices_str = "\n".join(f"{k}: {v}" for k, v in choices.items())
 
-        if _ai_client:
+        client = get_ai_client()
+        if client:
             prompt = STEP_PROMPTS["stats_generate"].format(
                 world_rules=world_rules_str,
                 all_choices=all_choices_str,
                 player_name=message.author.display_name,
             )
             try:
-                resp = await _ai_client.chat.completions.create(
-                    model=DEEPSEEK_MODEL, messages=[{"role": "user", "content": prompt}],
+                raw = await call_ai(
+                    messages=[{"role": "user", "content": prompt}],
                     temperature=0.7, max_tokens=800, timeout=30,
                 )
-                raw = resp.choices[0].message.content.strip()
-                parsed = self._parse_json(raw)
-                if parsed and "stats" in parsed:
-                    stats_data = parsed
+                if raw:
+                    parsed = parse_json_response(raw)
+                    if parsed and "stats" in parsed:
+                        stats_data = parsed
+                    else:
+                        stats_data = self._fallback_stats(message.author.display_name, choices)
                 else:
                     stats_data = self._fallback_stats(message.author.display_name, choices)
             except Exception:
@@ -457,27 +456,6 @@ class TRPGListener(commands.Cog):
             return json.loads(game.get("world_rules", "{}"))
         except (json.JSONDecodeError, TypeError):
             return {}
-
-    @staticmethod
-    def _parse_json(raw: str) -> dict | None:
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
-        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
-        brace_start = raw.find("{")
-        brace_end = raw.rfind("}")
-        if brace_start != -1 and brace_end != -1:
-            try:
-                return json.loads(raw[brace_start:brace_end + 1])
-            except json.JSONDecodeError:
-                pass
-        return None
 
 
 async def setup(bot: commands.Bot):

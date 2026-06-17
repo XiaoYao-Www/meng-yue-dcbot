@@ -117,7 +117,7 @@ class RpgStatusCommand(commands.Cog):
                     world_rules = json.loads(game.get("world_rules", "{}"))
                 except (json.JSONDecodeError, TypeError):
                     pass
-                skills = [s["name"] for s in world_rules.get("skills", [])]
+                skills = [s["name"] for s in world_rules.get("character_creation", {}).get("skills", [])]
 
             if not skills:
                 await interaction.followup.send("📚 目前沒有可用技能。", ephemeral=True)
