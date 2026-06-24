@@ -1,8 +1,8 @@
 from discord.ext import commands, tasks
-from discord import Message
+from discord import Message, Forbidden, HTTPException
 from database.user_base_db import userBaseDB
-from datetime import datetime, timedelta, time
-from config import TZ
+from datetime import datetime, timedelta
+from config import TZ, NEW_DAY_TIME, SIGN_IN_XP, SIGN_IN_REPUTATION
 
 class SignInEvent(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -51,7 +51,7 @@ class SignInEvent(commands.Cog):
 
             # 更新資料庫
             await userBaseDB.update_user_sign_in(user_id, new_streak)             # 更新簽到
-            await userBaseDB.update_user_stats(user_id, xp=100, reputation=100)   # 增加經驗與聲望
+            await userBaseDB.update_user_stats(user_id, xp=SIGN_IN_XP, reputation=SIGN_IN_REPUTATION)   # 增加經驗與聲望
 
             # 即時身分組檢查（單人）
             if message.guild:
@@ -61,11 +61,20 @@ class SignInEvent(commands.Cog):
 
             # 成功簽到，給表情符號
             self._today_cache.add(user_id)
-            await message.add_reaction("🗓️")
+            try:
+                await message.add_reaction("🗓️")
+            except Forbidden:
+                print(f"[SignIn] 缺少新增反應權限 (Channel {message.channel.id})")
+            except HTTPException:
+                print(f"[SignIn] HTTP 錯誤無法新增反應 (Channel {message.channel.id})")
+        except Forbidden:
+            print(f"[SignIn] 權限錯誤 (User {message.author.id}): 無法存取或操作")
+        except HTTPException as e:
+            print(f"[SignIn] HTTP 錯誤 (User {message.author.id}): {e}")
         except Exception as e:
-            print(f"❌ sign_in on_message 處理錯誤: {e}")
+            print(f"❌ sign_in on_message 處理錯誤 (User {message.author.id}): {e}")
 
-    @tasks.loop(time=time(hour=0, minute=0, second=0, tzinfo=TZ))
+    @tasks.loop(time=NEW_DAY_TIME)
     async def new_day_task(self):
         """### 每日任務
         """

@@ -125,7 +125,10 @@ class RoleCheckEvent(commands.Cog):
     async def role_check_loop(self):
         """### 定時身分組檢查（安全網）：比對成員聲望與簽到天數，自動增/減身分組
         """
-        await self.run_full_scan()
+        try:
+            await self.run_full_scan()
+        except Exception as e:
+            print(f"❌ 定時身分組檢查失敗: {e}")
 
     @role_check_loop.before_loop
     async def before_role_check_loop(self):

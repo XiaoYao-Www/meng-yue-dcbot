@@ -5,20 +5,10 @@ import os
 import discord
 from discord.ext import commands
 import importlib.util
+from config import DISCORD_TOKEN, GUILD_ID
 from database.user_base_db import userBaseDB
 from database.role_db import roleConfigDB
-
-
-##### 讀取設定 #####
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID", 0))
-DB_PATH = os.getenv("DB_PATH")
-
-if TOKEN is None:
-    raise RuntimeError("❌ DISCORD_TOKEN 環境變數未設定！請在 .env 檔案中設定 DISCORD_TOKEN")
-if DB_PATH is None:
-    raise RuntimeError("❌ DB_PATH 環境變數未設定！請在 .env 檔案中設定 DB_PATH")
+from database.daily_content_db import dailyContentDB
 
 
 ##### 函式定義 #####
@@ -82,25 +72,33 @@ class MyBot(commands.Bot):
         """
         await userBaseDB.close()
         await roleConfigDB.close()
+        await dailyContentDB.close()
         print("🔄 資料庫連線已關閉")
         await super().close()
 
-bot = MyBot(command_prefix="!", intents=intents)
+bot: MyBot = MyBot(command_prefix="!", intents=intents)
 
 ##### 機器人啟動 #####
 
 @bot.event
 async def on_ready():
-    # 資料庫初始化
-    await userBaseDB.connect()
-    await userBaseDB.setup()
-    await roleConfigDB.connect()
-    await roleConfigDB.setup()
-    # 啟動完成
-    print(f"{bot.user} 已上線！")
+    """### 機器人啟動完成事件
+    """
+    try:
+        # 資料庫初始化
+        await userBaseDB.connect()
+        await userBaseDB.setup()
+        await roleConfigDB.connect()
+        await roleConfigDB.setup()
+        await dailyContentDB.connect()
+        await dailyContentDB.setup()
+        # 啟動完成
+        print(f"{bot.user} 已上線！")
+    except Exception as e:
+        print(f"❌ on_ready 資料庫初始化失敗: {e}")
 
-print("TOKEN loaded:", "✅" if TOKEN else "❌ MISSING")
-if TOKEN is None:
+print("TOKEN loaded:", "✅" if DISCORD_TOKEN else "❌ MISSING")
+if DISCORD_TOKEN is None:
     print("❌ DISCORD_TOKEN 未設定，無法啟動 Bot。")
     exit(1)
-bot.run(TOKEN)
+bot.run(DISCORD_TOKEN)

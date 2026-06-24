@@ -3,7 +3,7 @@ import asyncio
 import os
 import datetime
 from typing import Optional, List, TypedDict, cast
-from config import TZ, INIT_SIGN_TIME, MAX_REPUTATION
+from config import TZ, INIT_SIGN_TIME, MAX_REPUTATION, DB_PATH
 
 class UserBaseRow(TypedDict):
     user_id: int
@@ -26,6 +26,8 @@ class UserDatabase:
 
     async def connect(self) -> None:
         """在應用啟動時呼叫一次，保持連線"""
+        if self.db is not None:
+            return  # 已連線，防止 RESUME 事件重複初始化
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.db = await aiosqlite.connect(self.db_path)
         self.db.row_factory = aiosqlite.Row
@@ -234,9 +236,5 @@ class UserDatabase:
             await self.db.commit()
             return count
         
-DB_PATH = os.getenv("DB_PATH")
-
-if DB_PATH is None:
-    raise RuntimeError("❌ DB_PATH 環境變數未設定！請在 .env 檔案中設定 DB_PATH")
 
 userBaseDB = UserDatabase(DB_PATH)

@@ -1,7 +1,7 @@
 from discord.ext import commands, tasks
-from datetime import datetime, time
+from datetime import datetime
 from database.user_base_db import userBaseDB
-from config import TZ, DAILY_REPUTATION_DECAY
+from config import TZ, DAILY_REPUTATION_DECAY, NEW_DAY_TIME
 
 class NewDayEvent(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -13,7 +13,7 @@ class NewDayEvent(commands.Cog):
         """
         self.new_day_task.cancel()  # 插件卸載時取消任務，避免背景殘留
 
-    @tasks.loop(time=time(hour=0, minute=0, second=0, tzinfo=TZ))
+    @tasks.loop(time=NEW_DAY_TIME)
     async def new_day_task(self):
         """### 每日任務
         """

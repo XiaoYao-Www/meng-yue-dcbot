@@ -2,6 +2,7 @@ import aiosqlite
 import asyncio
 import os
 from typing import Optional, List, TypedDict, cast
+from config import DB_PATH
 
 
 class RoleConfigRow(TypedDict):
@@ -21,6 +22,8 @@ class RoleConfigDatabase:
 
     async def connect(self) -> None:
         """在應用啟動時呼叫一次，保持連線"""
+        if self.db is not None:
+            return  # 已連線，防止 RESUME 事件重複初始化
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self.db = await aiosqlite.connect(self.db_path)
         self.db.row_factory = aiosqlite.Row
@@ -106,9 +109,5 @@ class RoleConfigDatabase:
             await self.db.commit()
 
 
-DB_PATH = os.getenv("DB_PATH")
-
-if DB_PATH is None:
-    raise RuntimeError("❌ DB_PATH 環境變數未設定！請在 .env 檔案中設定 DB_PATH")
 
 roleConfigDB = RoleConfigDatabase(DB_PATH)
