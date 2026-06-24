@@ -3,6 +3,7 @@ import asyncio
 import os
 import datetime
 from typing import Optional, List, TypedDict, cast
+import random
 from config import TZ, INIT_SIGN_TIME, MAX_REPUTATION, DB_PATH
 
 class UserBaseRow(TypedDict):
@@ -80,6 +81,14 @@ class UserDatabase:
                     streak_count INTEGER DEFAULT 0,
                     max_streak INTEGER DEFAULT 0,
                     total_sign_in INTEGER DEFAULT 0
+                )
+            """)
+            await self.db.execute("""
+                CREATE TABLE IF NOT EXISTS user_items (
+                    user_id INTEGER NOT NULL,
+                    tag TEXT NOT NULL,
+                    item TEXT NOT NULL,
+                    PRIMARY KEY (user_id, tag, item)
                 )
             """)
             await self.db.commit()
@@ -236,5 +245,104 @@ class UserDatabase:
             await self.db.commit()
             return count
         
+    ##### 使用者自訂項目（通用抽選系統） #####
+
+    async def add_user_item(self, user_id: int, tag: str, item: str) -> bool:
+        """### 新增使用者自訂項目
+
+        同一使用者、同一標籤下不允許重複項目。
+
+        Args:
+            user_id: 使用者 Discord ID
+            tag: 分類標籤（如 \"menu\"）
+            item: 項目內容
+
+        Returns:
+            是否成功新增（False 代表已存在重複項目）
+        """
+        await self._ensure_connection()
+        try:
+            async with self._lock:
+                await self._ensure_user(user_id)
+                await self.db.execute(
+                    "INSERT INTO user_items (user_id, tag, item) VALUES (?, ?, ?)",
+                    (user_id, tag, item),
+                )
+                await self.db.commit()
+                return True
+        except Exception:
+            return False
+
+    async def remove_user_item(self, user_id: int, tag: str, item: str) -> bool:
+        """### 刪除使用者自訂項目
+
+        Args:
+            user_id: 使用者 Discord ID
+            tag: 分類標籤
+            item: 項目內容
+
+        Returns:
+            是否存在並成功刪除
+        """
+        await self._ensure_connection()
+        async with self._lock:
+            cursor = await self.db.execute(
+                "DELETE FROM user_items WHERE user_id = ? AND tag = ? AND item = ?",
+                (user_id, tag, item),
+            )
+            await self.db.commit()
+            return cursor.rowcount > 0
+
+    async def get_user_items(self, user_id: int, tag: str) -> List[str]:
+        """### 取得使用者在某標籤下的所有項目
+
+        Args:
+            user_id: 使用者 Discord ID
+            tag: 分類標籤
+
+        Returns:
+            項目字串列表
+        """
+        await self._ensure_connection()
+        async with self.db.execute(
+            "SELECT item FROM user_items WHERE user_id = ? AND tag = ? ORDER BY rowid",
+            (user_id, tag),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [row["item"] for row in rows]
+
+    async def pick_random_user_item(self, user_id: int, tag: str) -> Optional[str]:
+        """### 從使用者的某標籤清單中隨機抽取一個項目
+
+        Args:
+            user_id: 使用者 Discord ID
+            tag: 分類標籤
+
+        Returns:
+            隨機項目，若清單為空則回傳 None
+        """
+        items = await self.get_user_items(user_id, tag)
+        if not items:
+            return None
+        return random.choice(items)
+
+    async def get_user_item_count(self, user_id: int, tag: str) -> int:
+        """### 取得使用者在某標籤下的項目數量
+
+        Args:
+            user_id: 使用者 Discord ID
+            tag: 分類標籤
+
+        Returns:
+            項目總數
+        """
+        await self._ensure_connection()
+        async with self.db.execute(
+            "SELECT COUNT(*) AS cnt FROM user_items WHERE user_id = ? AND tag = ?",
+            (user_id, tag),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row["cnt"] if row else 0
+
 
 userBaseDB = UserDatabase(DB_PATH)

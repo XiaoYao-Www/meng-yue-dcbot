@@ -53,3 +53,8 @@ MAX_MESSAGE_REPUTATION: int = 50             # 單則訊息聲望上限
 
 ROLE_CHECK_INTERVAL_MINUTES: int = 360       # 完整掃描間隔（分鐘），6 小時一次
 ROLE_CHECK_SINGLE_ENABLED: bool = True       # 啟用即時單人檢查
+
+
+# ── 使用者自訂項目清單 ──
+
+MAX_USER_ITEMS_PER_TAG: int = 50             # 單一標籤下項目數量上限
