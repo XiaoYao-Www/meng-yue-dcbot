@@ -58,3 +58,9 @@ ROLE_CHECK_SINGLE_ENABLED: bool = True       # 啟用即時單人檢查
 # ── 使用者自訂項目清單 ──
 
 MAX_USER_ITEMS_PER_TAG: int = 50             # 單一標籤下項目數量上限
+
+
+# ── 每日學習 AI 重試 ──
+
+DAILY_AI_MAX_RETRIES: int = 3               # API 呼叫失敗/回傳錯誤時的最大重試次數
+DAILY_AI_RETRY_BASE_DELAY: float = 2.0      # 重試基礎等待秒數（指數退避：delay * (2 ** attempt)）

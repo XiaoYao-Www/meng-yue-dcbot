@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from discord import Embed, Color
 from discord.ext import commands, tasks
 
-from config import TZ, DAILY_CHANNEL, DEEPSEEK_API_KEY, DAILY_MESSAGE_TIME
+from config import TZ, DAILY_CHANNEL, DEEPSEEK_API_KEY, DAILY_MESSAGE_TIME, DAILY_AI_MAX_RETRIES, DAILY_AI_RETRY_BASE_DELAY
 from database.daily_content_db import dailyContentDB
 
 
@@ -150,7 +150,7 @@ class DailyMessageEvent(commands.Cog):
             return None
 
     async def _call_deepseek(self, prompt: str) -> Optional[Dict[str, str]]:
-        """### 呼叫 DeepSeek API 生成內容
+        """### 呼叫 DeepSeek API 生成內容（含自動重試）
 
         Args:
             prompt: 提示詞
@@ -162,22 +162,39 @@ class DailyMessageEvent(commands.Cog):
             print("[DailyMessage] ❌ DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
             return None
 
-        try:
-            def _sync_call() -> str:
-                response = self._ai_client.chat.completions.create(
-                    model="deepseek-chat",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7,
-                    max_tokens=1024,
-                )
-                return response.choices[0].message.content or ""
+        max_retries = DAILY_AI_MAX_RETRIES
+        base_delay = DAILY_AI_RETRY_BASE_DELAY
 
-            text = await asyncio.to_thread(_sync_call)
-            return self._parse_ai_response(text)
+        for attempt in range(1, max_retries + 1):
+            try:
+                def _sync_call() -> str:
+                    response = self._ai_client.chat.completions.create(
+                        model="deepseek-chat",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.7,
+                        max_tokens=1024,
+                    )
+                    return response.choices[0].message.content or ""
 
-        except Exception as e:
-            print(f"[DailyMessage] ❌ DeepSeek API 呼叫失敗: {e}")
-            return None
+                text = await asyncio.to_thread(_sync_call)
+                parsed = self._parse_ai_response(text)
+                if parsed is not None:
+                    return parsed
+
+                # JSON 解析失敗或欄位缺失（_parse_ai_response 回傳 None）
+                print(f"[DailyMessage] ⚠️ 第 {attempt}/{max_retries} 次嘗試失敗（解析錯誤）")
+
+            except Exception as e:
+                print(f"[DailyMessage] ⚠️ 第 {attempt}/{max_retries} 次嘗試失敗: {e}")
+
+            # 若非最後一次，指數退避後重試
+            if attempt < max_retries:
+                delay = base_delay * (2 ** (attempt - 1))
+                print(f"[DailyMessage] ⏳ 等待 {delay} 秒後重試...")
+                await asyncio.sleep(delay)
+
+        print(f"[DailyMessage] ❌ DeepSeek API 呼叫失敗（已重試 {max_retries} 次）")
+        return None
 
     @tasks.loop(time=DAILY_MESSAGE_TIME)
     async def daily_message_task(self):
