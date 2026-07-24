@@ -48,7 +48,7 @@ class DailyQueryCommand(commands.Cog):
                 )
                 return
 
-            # 使用共用 Embed 建置函式
+            # 使用共用 Embed 建置函式（新 schema 相容）
             embed = build_daily_embed(content)
             await interaction.followup.send(embed=embed)
 

@@ -7,15 +7,21 @@ from config import DB_PATH
 
 class DailyContentRow(TypedDict):
     date: str
-    quote_text: str
-    quote_source: str
-    quote_author: str
-    quote_translation: str
-    idiom_text: str
-    idiom_explanation: str
-    idiom_usage: str
-    idiom_origin: str
+    section1_type: str          # 心理學／社會學
+    section1_title: str
+    section1_summary: str       # 頻道簡述
+    section1_detail: str        # 討論串詳細資料
+    section1_sources: str       # 出處引用
+    section1_credibility: str   # 可信度評級
+    section2_type: str          # 哲學／神話／神祕學
+    section2_title: str
+    section2_summary: str       # 頻道簡述
+    section2_detail: str        # 討論串詳細資料
+    section2_sources: str       # 出處引用
+    section2_credibility: str   # 可信度評級
     generated_at: str
+    verified_at: str            # 驗證時間
+    verification_notes: str     # 驗證備註
 
 
 class DailyContentDatabase:
@@ -66,65 +72,119 @@ class DailyContentDatabase:
             await self.setup()
 
     async def setup(self) -> None:
-        """初始化表格"""
+        """初始化表格（含舊 schema 遷移）"""
         if self.db is None:
             await self.connect()
 
         async with self._lock:
+            # 檢查是否為舊 schema（有舊欄位則代表需遷移）
+            cursor = await self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='daily_content'"
+            )
+            table_exists = await cursor.fetchone()
+
+            if table_exists:
+                # 檢查是否有新欄位（section1_type）來判斷 schema 版本
+                col_cursor = await self.db.execute("PRAGMA table_info(daily_content)")
+                columns = [row[1] async for row in col_cursor]
+
+                if "section1_type" not in columns:
+                    # 舊 schema：重新命名舊表，建立新表
+                    print("[DailyContentDB] ⚠️ 偵測到舊版 schema，進行遷移...")
+                    await self.db.execute("ALTER TABLE daily_content RENAME TO daily_content_old")
+                    await self.db.commit()
+
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS daily_content (
-                    date               TEXT PRIMARY KEY,
-                    quote_text         TEXT NOT NULL,
-                    quote_source       TEXT NOT NULL,
-                    quote_author       TEXT NOT NULL,
-                    quote_translation  TEXT NOT NULL,
-                    idiom_text         TEXT NOT NULL,
-                    idiom_explanation  TEXT NOT NULL,
-                    idiom_usage        TEXT NOT NULL,
-                    idiom_origin       TEXT NOT NULL,
-                    generated_at       TEXT NOT NULL
+                    date                  TEXT PRIMARY KEY,
+                    section1_type         TEXT NOT NULL,
+                    section1_title        TEXT NOT NULL,
+                    section1_summary      TEXT NOT NULL,
+                    section1_detail       TEXT NOT NULL,
+                    section1_sources      TEXT NOT NULL,
+                    section1_credibility  TEXT NOT NULL,
+                    section2_type         TEXT NOT NULL,
+                    section2_title        TEXT NOT NULL,
+                    section2_summary      TEXT NOT NULL,
+                    section2_detail       TEXT NOT NULL,
+                    section2_sources      TEXT NOT NULL,
+                    section2_credibility  TEXT NOT NULL,
+                    generated_at          TEXT NOT NULL,
+                    verified_at           TEXT NOT NULL DEFAULT '',
+                    verification_notes    TEXT NOT NULL DEFAULT ''
                 )
             """)
             await self.db.commit()
+
+            # 若存在舊表，嘗試複製相容資料並刪除
+            try:
+                await self.db.execute(
+                    "SELECT COUNT(*) FROM daily_content_old"
+                )
+                old_exists = True
+            except Exception:
+                old_exists = False
+
+            if old_exists:
+                print("[DailyContentDB] ℹ️ 舊表 daily_content_old 仍存在，可手動刪除")
+                # 不自動刪除，保留以備回查
 
     ##### 寫入功能 #####
 
     async def set_daily_content(
         self,
         date: str,
-        quote_text: str,
-        quote_source: str,
-        quote_author: str,
-        quote_translation: str,
-        idiom_text: str,
-        idiom_explanation: str,
-        idiom_usage: str,
-        idiom_origin: str,
+        section1_type: str,
+        section1_title: str,
+        section1_summary: str,
+        section1_detail: str,
+        section1_sources: str,
+        section1_credibility: str,
+        section2_type: str,
+        section2_title: str,
+        section2_summary: str,
+        section2_detail: str,
+        section2_sources: str,
+        section2_credibility: str,
         generated_at: str,
+        verified_at: str = "",
+        verification_notes: str = "",
     ) -> None:
         """### 寫入每日內容（以 date 為 PK，同日期重複寫入會覆蓋）
 
         Args:
             date: 日期 YYYY-MM-DD
-            quote_text: 佳句原文
-            quote_source: 佳句出處（書名/作品名）
-            quote_author: 佳句作者
-            quote_translation: 佳句繁體中文翻譯
-            idiom_text: 成語/諺語
-            idiom_explanation: 成語解釋
-            idiom_usage: 成語用法例句
-            idiom_origin: 成語出處
+            section1_type: 第一則類型（心理學／社會學）
+            section1_title: 第一則標題
+            section1_summary: 第一則簡述（頻道用）
+            section1_detail: 第一則詳細資料（討論串用）
+            section1_sources: 第一則出處引用
+            section1_credibility: 第一則可信度評級
+            section2_type: 第二則類型（哲學／神話／神祕學）
+            section2_title: 第二則標題
+            section2_summary: 第二則簡述（頻道用）
+            section2_detail: 第二則詳細資料（討論串用）
+            section2_sources: 第二則出處引用
+            section2_credibility: 第二則可信度評級
             generated_at: 生成時間
+            verified_at: 驗證時間
+            verification_notes: 驗證備註
         """
         await self._ensure_connection()
         async with self._lock:
             await self.db.execute("""
                 INSERT OR REPLACE INTO daily_content
-                    (date, quote_text, quote_source, quote_author, quote_translation,
-                     idiom_text, idiom_explanation, idiom_usage, idiom_origin, generated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (date, quote_text, quote_source, quote_author, quote_translation,
-                  idiom_text, idiom_explanation, idiom_usage, idiom_origin, generated_at))
+                    (date, section1_type, section1_title, section1_summary, section1_detail,
+                     section1_sources, section1_credibility,
+                     section2_type, section2_title, section2_summary, section2_detail,
+                     section2_sources, section2_credibility,
+                     generated_at, verified_at, verification_notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (date, section1_type, section1_title, section1_summary, section1_detail,
+                  section1_sources, section1_credibility,
+                  section2_type, section2_title, section2_summary, section2_detail,
+                  section2_sources, section2_credibility,
+                  generated_at, verified_at, verification_notes))
             await self.db.commit()
 
     ##### 查詢功能 #####
@@ -163,7 +223,6 @@ class DailyContentDatabase:
         except Exception as e:
             print(f"[DailyContentDB Error] 查詢全部失敗: {e}")
             return []
-
 
 
 dailyContentDB = DailyContentDatabase(DB_PATH)
