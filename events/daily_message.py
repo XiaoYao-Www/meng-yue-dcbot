@@ -10,6 +10,7 @@ from json_repair import repair_json
 
 from config import TZ, DAILY_CHANNEL, DEEPSEEK_API_KEY, DAILY_MESSAGE_TIME, DAILY_AI_MAX_RETRIES, DAILY_AI_RETRY_BASE_DELAY, DAILY_AI_MODEL, DAILY_AI_BASE_URL, DAILY_GENERATION_MAX_TOKENS, DAILY_VERIFICATION_MAX_TOKENS, DAILY_VERIFY_MAX_RETRIES, DAILY_VERIFY_RETRY_BASE_DELAY, DAILY_SINGLE_SECTION_GENERATION_PROMPT_TEMPLATE, DAILY_SINGLE_SECTION_VERIFICATION_PROMPT_TEMPLATE
 from database.daily_content_db import dailyContentDB
+from utils.article_exporter import save_article_md
 
 
 def build_daily_embed(content: dict) -> Embed:
@@ -660,6 +661,33 @@ class DailyMessageEvent(commands.Cog):
                 verification_notes=verification_notes,
             )
             print(f"[DailyMessage] ✅ 已儲存 {date_str} 的每日內容")
+
+            # 6.5 匯出為 Markdown 文章（每篇獨立 .md 檔案）
+            s1_article_data = {
+                "section_type": generated["section1_type"],
+                "section_title": generated["section1_title"],
+                "section_summary": generated["section1_summary"],
+                "section_detail": generated["section1_detail"],
+                "section_sources": generated["section1_sources"],
+                "section_credibility": s1_cred,
+                "generated_at": now_str,
+                "verified_at": verified_at_str,
+                "verification_notes": verification_notes,
+            }
+            save_article_md(s1_article_data, date_str, 1)
+
+            s2_article_data = {
+                "section_type": generated["section2_type"],
+                "section_title": generated["section2_title"],
+                "section_summary": generated["section2_summary"],
+                "section_detail": generated["section2_detail"],
+                "section_sources": generated["section2_sources"],
+                "section_credibility": s2_cred,
+                "generated_at": now_str,
+                "verified_at": verified_at_str,
+                "verification_notes": verification_notes,
+            }
+            save_article_md(s2_article_data, date_str, 2)
 
             # 7. 發送到頻道
             if not DAILY_CHANNEL:

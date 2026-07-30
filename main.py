@@ -2,13 +2,51 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import shutil
 import discord
 from discord.ext import commands
 import importlib.util
-from config import DISCORD_TOKEN, GUILD_ID
+from config import DISCORD_TOKEN, GUILD_ID, DB_PATH
 from database.user_base_db import userBaseDB
 from database.role_db import roleConfigDB
 from database.daily_content_db import dailyContentDB
+from utils.article_exporter import export_all_history
+
+
+def _migrate_legacy_db_path() -> None:
+    """### 將舊版 data/*.db 遷移至 data/db/*.db
+
+    檢查 data/ 下是否有 legacy .db 檔案，若有則搬移至新的 DB_PATH (data/db/)。
+    僅在首次部署或更新後執行一次，後續當 data/ 下無 .db 檔即跳過。
+    """
+    old_dir = os.path.join(os.path.dirname(__file__), "data")
+    new_dir = os.path.join(os.path.dirname(__file__), DB_PATH)  # data/db
+    db_files = ["daily_content.db", "user_base.db", "role_config.db"]
+
+    legacy_files = [f for f in db_files if os.path.exists(os.path.join(old_dir, f))]
+    if not legacy_files:
+        return  # 無舊檔，跳過遷移
+
+    os.makedirs(new_dir, exist_ok=True)
+    for fname in legacy_files:
+        old_path = os.path.join(old_dir, fname)
+        new_path = os.path.join(new_dir, fname)
+        try:
+            shutil.move(old_path, new_path)
+            print(f"📦 資料庫遷移: {old_path} → {new_path}")
+        except Exception as e:
+            print(f"❌ 資料庫遷移失敗 {old_path}: {e}")
+
+        # 一併搬移 WAL/SHM journal 檔案（若存在）
+        for ext in ("-wal", "-shm", "-journal"):
+            old_j = old_path + ext
+            new_j = new_path + ext
+            if os.path.exists(old_j):
+                try:
+                    shutil.move(old_j, new_j)
+                    print(f"📦 搬移附屬檔案: {old_j} → {new_j}")
+                except Exception as e:
+                    print(f"⚠️ 搬移 {old_j} 失敗: {e}")
 
 
 ##### 函式定義 #####
@@ -85,6 +123,9 @@ async def on_ready():
     """### 機器人啟動完成事件
     """
     try:
+        # 遷移舊版 data/*.db → data/db/*.db（安全起見僅執行一次）
+        _migrate_legacy_db_path()
+
         # 資料庫初始化
         await userBaseDB.connect()
         await userBaseDB.setup()
@@ -92,6 +133,9 @@ async def on_ready():
         await roleConfigDB.setup()
         await dailyContentDB.connect()
         await dailyContentDB.setup()
+        # 啟動時自動匯出遺漏的歷史文章
+        await export_all_history(dailyContentDB)
+
         # 啟動完成
         print(f"{bot.user} 已上線！")
     except Exception as e:

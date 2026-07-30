@@ -45,6 +45,9 @@ class DailyContentDatabase:
         await self.db.execute("PRAGMA journal_mode=WAL")
         await self.db.execute("PRAGMA synchronous=NORMAL")
 
+        # 自動 checkpoint
+        await self.db.execute("PRAGMA wal_autocheckpoint=1")
+
     async def close(self) -> None:
         """在應用關閉時呼叫"""
         if self.db:
