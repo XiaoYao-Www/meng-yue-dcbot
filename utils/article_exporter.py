@@ -84,19 +84,26 @@ def build_article_md(
     sec_detail = section_data.get("section_detail", section_data.get(f"section{section_number}_detail", ""))
     sec_sources = section_data.get("section_sources", section_data.get(f"section{section_number}_sources", ""))
     sec_credibility = section_data.get("section_credibility", section_data.get(f"section{section_number}_credibility", ""))
+    sec_quick_learn = section_data.get("section_quick_learn", section_data.get(f"section{section_number}_quick_learn", ""))
 
     generated_at = section_data.get("generated_at", "")
     verified_at = section_data.get("verified_at", "")
     verification_notes = section_data.get("verification_notes", "")
 
     # ── 解析 detail 中的「知識價值」區塊 ──
+    # 新格式：## 【知識價值】；舊格式：【知識價值】（歷史資料相容）
     knowledge_value = ""
     detail_body = sec_detail
-    kv_marker = "【知識價值】"
-    if kv_marker in sec_detail:
-        parts = sec_detail.split(kv_marker, 1)
+    kv_marker_new = "## 【知識價值】"
+    kv_marker_old = "【知識價值】"
+    if kv_marker_new in sec_detail:
+        parts = sec_detail.split(kv_marker_new, 1)
         detail_body = parts[0].strip()
-        knowledge_value = kv_marker + parts[1]
+        knowledge_value = kv_marker_new + parts[1]
+    elif kv_marker_old in sec_detail:
+        parts = sec_detail.split(kv_marker_old, 1)
+        detail_body = parts[0].strip()
+        knowledge_value = kv_marker_old + parts[1]
 
     lines: List[str] = []
 
@@ -128,6 +135,16 @@ def build_article_md(
             lines.append(f"> {para}")
         lines.append("")
 
+    # ── 快速學習 ──
+    if sec_quick_learn:
+        lines.append("## 快速學習")
+        lines.append("")
+        for para in sec_quick_learn.split("\n"):
+            para = para.strip()
+            if para:
+                lines.append(para)
+                lines.append("")
+
     # ── 詳細內容 ──
     lines.append("## 詳細內容")
     lines.append("")
@@ -146,13 +163,17 @@ def build_article_md(
 
     # ── 知識價值 ──
     if knowledge_value:
-        lines.append("## 知識價值")
+        lines.append("## 【知識價值】")
         lines.append("")
         for line in knowledge_value.split("\n"):
             line = line.strip()
-            if line:
-                lines.append(line)
-                lines.append("")
+            if not line:
+                continue
+            # 跳過原始標題行（## 【知識價值】 或 【知識價值】）
+            if line.startswith("## ") or line.startswith("【知識價值】"):
+                continue
+            lines.append(line)
+            lines.append("")
 
     # ── 參考資料 ──
     if sec_sources:
@@ -169,7 +190,7 @@ def build_article_md(
         lines.append("")
 
     # ── 可信度評級 ──
-    lines.append(f"**📊 可信度評級：** {sec_credibility}")
+    lines.append(f"**可信度評級：** {sec_credibility}")
     lines.append("")
 
     # ── 驗證資訊 ──
@@ -186,7 +207,7 @@ def build_article_md(
 
     # ── 免責聲明 ──
     lines.append("")
-    lines.append("> ⚠️ 內容由 AI 生成並經自動驗證，請自行斟酌參考。")
+    lines.append("> 內容由 AI 生成並經自動驗證，請自行斟酌參考。")
 
     return "\n".join(lines)
 
@@ -229,10 +250,10 @@ def save_article_md(
     try:
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(md_content)
-        print(f"📝 已匯出文章: {filepath}")
+        print(f"已匯出文章: {filepath}")
         return filepath
     except Exception as e:
-        print(f"❌ 匯出文章失敗 {filepath}: {e}")
+        print(f"匯出文章失敗 {filepath}: {e}")
         return None
 
 
@@ -261,48 +282,31 @@ async def export_all_history(
     try:
         rows = await db.get_all_contents()
     except Exception as e:
-        print(f"❌ 讀取資料庫失敗: {e}")
+        print(f"讀取資料庫失敗: {e}")
         return 0
 
     if not rows:
-        print("📭 資料庫中無歷史內容可匯出")
+        print("資料庫中無歷史內容可匯出")
         return 0
 
     count = 0
     for row in rows:
         date_str = row["date"]
-
-        # Section 1
-        s1_data = {
-            "section_type": row["section1_type"],
-            "section_title": row["section1_title"],
-            "section_summary": row["section1_summary"],
-            "section_detail": row["section1_detail"],
-            "section_sources": row["section1_sources"],
-            "section_credibility": row["section1_credibility"],
-            "generated_at": row["generated_at"],
+        section_data = {
+            "section_type": row["section_type"],
+            "section_title": row["section_title"],
+            "section_summary": row["section_summary"],
+            "section_detail": row["section_detail"],
+            "section_quick_learn": row.get("section_quick_learn", ""),
+            "section_sources": row["section_sources"],
+            "section_credibility": row["section_credibility"],
+            "generated_at": row.get("generated_at", ""),
             "verified_at": row.get("verified_at", ""),
             "verification_notes": row.get("verification_notes", ""),
         }
-        s1_path = save_article_md(s1_data, date_str, 1, articles_dir)
-        if s1_path:
+        path = save_article_md(section_data, date_str, 1, articles_dir)
+        if path:
             count += 1
 
-        # Section 2
-        s2_data = {
-            "section_type": row["section2_type"],
-            "section_title": row["section2_title"],
-            "section_summary": row["section2_summary"],
-            "section_detail": row["section2_detail"],
-            "section_sources": row["section2_sources"],
-            "section_credibility": row["section2_credibility"],
-            "generated_at": row["generated_at"],
-            "verified_at": row.get("verified_at", ""),
-            "verification_notes": row.get("verification_notes", ""),
-        }
-        s2_path = save_article_md(s2_data, date_str, 2, articles_dir)
-        if s2_path:
-            count += 1
-
-    print(f"📚 歷史文章匯出完成，共 {count} 篇")
+    print(f"歷史文章匯出完成，共 {count} 篇")
     return count

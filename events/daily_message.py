@@ -2,56 +2,79 @@ import asyncio
 import json
 import openai
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from discord import Embed, Color
 from discord.ext import commands, tasks
 from json_repair import repair_json
 
-from config import TZ, DAILY_CHANNEL, DEEPSEEK_API_KEY, DAILY_MESSAGE_TIME, DAILY_AI_MAX_RETRIES, DAILY_AI_RETRY_BASE_DELAY, DAILY_AI_MODEL, DAILY_AI_BASE_URL, DAILY_GENERATION_MAX_TOKENS, DAILY_VERIFICATION_MAX_TOKENS, DAILY_VERIFY_MAX_RETRIES, DAILY_VERIFY_RETRY_BASE_DELAY, DAILY_SINGLE_SECTION_GENERATION_PROMPT_TEMPLATE, DAILY_SINGLE_SECTION_VERIFICATION_PROMPT_TEMPLATE
+from config import (
+    TZ, DAILY_CHANNEL, DEEPSEEK_API_KEY, DAILY_MESSAGE_TIME,
+    DAILY_AI_MAX_RETRIES, DAILY_AI_RETRY_BASE_DELAY, DAILY_AI_MODEL,
+    DAILY_AI_BASE_URL, DAILY_GENERATION_MAX_TOKENS, DAILY_VERIFICATION_MAX_TOKENS,
+    DAILY_VERIFY_MAX_RETRIES, DAILY_VERIFY_RETRY_BASE_DELAY,
+    DAILY_SINGLE_SECTION_GENERATION_PROMPT_TEMPLATE,
+    DAILY_SINGLE_SECTION_VERIFICATION_PROMPT_TEMPLATE,
+    DAILY_ARTICLES_PER_DAY,
+)
 from database.daily_content_db import dailyContentDB
 from utils.article_exporter import save_article_md
 
 
-def build_daily_embed(content: dict) -> Embed:
-    """### 建置每日知識 Embed（頻道簡述版本，供 event 與 command 共用）
+def _strip_embed_unsafe_markdown(text: str) -> str:
+    """### 剝離 Embed 不支援的 Markdown 語法
+
+    保留粗體（**）等 Embed 可渲染格式；移除標題行（#）、分隔線（---）、程式碼塊，
+    引用（>）移除前綴。防範 AI 未遵守「summary/quick_learn 僅限粗體」規範時造成排版錯亂。
 
     Args:
-        content: dict，需含 date 及 section1 / section2 的相關欄位
+        text: 原始文字
+
+    Returns:
+        剝離後的文字
+    """
+    lines: List[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or stripped.startswith("---"):
+            continue  # 標題與分隔線：整行移除
+        if stripped.startswith(">"):
+            stripped = stripped.lstrip(">").strip()  # 引用：移除 > 前綴
+        lines.append(stripped)
+    return "\n".join(lines)
+
+
+def build_daily_embed(contents: List[Dict[str, Any]]) -> Embed:
+    """### 建置每日知識 Embed（頻道簡述版本，供 event 與 command 共用）
+
+    一篇一個 field，同一天多篇依序顯示。
+
+    Args:
+        contents: list[dict]，該日全部文章（每篇含 date/section_type/section_title/
+                  section_summary/section_quick_learn/section_credibility/verified_at...）
 
     Returns:
         Embed
     """
+    date_str = contents[0]["date"] if contents else ""
     embed = Embed(
-        title=f"每日知識 — {content['date']}",
+        title=f"每日知識 — {date_str}",
         color=Color.blue(),
     )
 
-    # 第一則：心理學／社會學
-    s1 = f"**{content['section1_title']}**\n"
-    s1 += f"{content['section1_summary']}\n"
-    s1 += f"📊 可信度：{content['section1_credibility']}"
-    embed.add_field(
-        name=f"# {content['section1_type']}",
-        value=s1,
-        inline=False,
-    )
-
-    # 第二則：哲學／神話／神祕學
-    s2 = f"**{content['section2_title']}**\n"
-    s2 += f"{content['section2_summary']}\n"
-    s2 += f"📊 可信度：{content['section2_credibility']}"
-    embed.add_field(
-        name=f"# {content['section2_type']}",
-        value=s2,
-        inline=False,
-    )
-
-    # 驗證資訊
-    if content.get('verified_at'):
+    for content in contents:
+        field = f"**{content['section_title']}**\n"
+        field += f"{_strip_embed_unsafe_markdown(content['section_summary'])}\n"
+        if content.get("section_quick_learn"):
+            field += f"快速學習：{_strip_embed_unsafe_markdown(content['section_quick_learn'])}\n"
+        field += f"可信度：{content['section_credibility']}"
+        if content.get("verified_at"):
+            field += f"\n驗證時間：{content['verified_at']}"
         embed.add_field(
-            name="✅ 二次驗證",
-            value=f"驗證時間：{content['verified_at']}\n{content.get('verification_notes', '')}",
+            name=f"# {content['section_type']}",
+            value=field,
             inline=False,
         )
 
@@ -61,51 +84,42 @@ def build_daily_embed(content: dict) -> Embed:
     return embed
 
 
-def build_detail_content(content: dict) -> str:
-    """### 建置詳細資料文字（討論串用）
+def build_detail_content(content: Dict[str, Any]) -> str:
+    """### 建置單篇文章的詳細資料文字（討論串用）
 
     Args:
-        content: dict，每日內容
+        content: dict，單篇文章內容
 
     Returns:
         str: 格式化詳細文字
     """
     lines = [
-        f"# 每日知識詳細資料 — {content['date']}",
+        f"# {content['section_type']}：{content['section_title']}",
         "",
-        f"## 📖 {content['section1_type']}：{content['section1_title']}",
+        "## 快速學習",
         "",
-        content['section1_detail'],
+        content.get("section_quick_learn", ""),
         "",
-        "**📚 參考資料／出處**",
-        content['section1_sources'],
+        "## 詳細內容",
         "",
-        f"**📊 可信度評級：** {content['section1_credibility']}",
+        content["section_detail"],
         "",
-        "---",
+        "**參考資料／出處**",
+        content["section_sources"],
         "",
-        f"## 🔮 {content['section2_type']}：{content['section2_title']}",
-        "",
-        content['section2_detail'],
-        "",
-        "**📚 參考資料／出處**",
-        content['section2_sources'],
-        "",
-        f"**📊 可信度評級：** {content['section2_credibility']}",
-        "",
-        "---",
+        f"**可信度評級：** {content['section_credibility']}",
         "",
     ]
 
-    if content.get('verified_at'):
+    if content.get("verified_at"):
         lines.extend([
-            "## ✅ 二次驗證結果",
+            "## 驗證資訊",
             f"驗證時間：{content['verified_at']}",
-            content.get('verification_notes', ''),
+            content.get("verification_notes", ""),
             "",
         ])
 
-    lines.append("> ⚠️ 內容由 AI 生成並經自動驗證，請自行斟酌參考。")
+    lines.append("> 內容由 AI 生成並經自動驗證，請自行斟酌參考。")
 
     return "\n".join(lines)
 
@@ -127,88 +141,34 @@ class DailyMessageEvent(commands.Cog):
             self._ai_client.close()
 
     @staticmethod
-    def _get_category_group(section_type: str) -> str:
-        """### 從次領域回推大分類（用於避免兩篇撞同大類）
-
-        Args:
-            section_type: 次領域名稱（如「犯罪心理學」）
-
-        Returns:
-            大分類名稱（如「人類」）或空字串（無法識別）
-        """
-        category_map: Dict[str, List[str]] = {
-            "人類": [
-                "心理學", "社會心理學", "人格心理學", "認知心理學",
-                "發展心理學", "演化心理學", "神經心理學", "臨床心理學",
-                "教育心理學", "犯罪心理學", "司法心理學", "精神病學",
-                "精神醫學", "神經科學", "認知科學", "行為科學",
-                "行為經濟學",
-            ],
-            "社會": [
-                "社會學", "犯罪學", "政治學", "法理學", "法哲學",
-                "公共政策", "組織管理", "文化研究", "人類學", "經濟學",
-                "賽局理論", "傳播學",
-            ],
-            "思想": [
-                "哲學", "倫理學", "邏輯學", "認識論", "存在主義",
-                "現象學", "分析哲學", "東方哲學", "宗教哲學",
-            ],
-            "文明": [
-                "世界史", "文明史", "思想史", "科技史", "宗教史",
-                "軍事史", "法律史", "藝術史", "神話學", "比較神話",
-                "宗教學", "民俗學", "神祕學", "象徵學",
-            ],
-            "思考工具": [
-                "統計思維", "認知偏誤", "決策理論", "系統思考",
-                "風險分析", "資訊理論", "博弈論",
-            ],
-        }
-        for group, types in category_map.items():
-            if section_type in types:
-                return group
-        return ""
-
-    @staticmethod
     def _build_single_section_prompt(
-        section_label: str,
-        existing_contents: List[Dict[str, Any]],
-        excluded_categories: str = "",
+        existing_history: List[Dict[str, Any]],
+        forbidden_topics: str = "",
     ) -> str:
         """### 建構單篇生成 Prompt
 
+        單篇生成：每次只生成一篇，透過注入「當日禁止主題」避免同天主題類似。
+
         Args:
-            section_label: "第一則" 或 "第二則"
-            existing_contents: 歷史內容清單
-            excluded_categories: 要排除的大分類字串（另一篇已使用的大類）
+            existing_history: 更早歷史內容清單（不含當日，避免與歷史重複）
+            forbidden_topics: 當日已生成主題清單（注入為禁止主題）
 
         Returns:
             str: prompt
         """
         # 建立歷史標題摘要
         history_lines: List[str] = []
-        for row in existing_contents:
+        for row in existing_history:
             history_lines.append(
-                f'- [{row["section1_type"]}]「{row["section1_title"]}」| '
-                f'[{row["section2_type"]}]「{row["section2_title"]}」'
+                f'- [{row["section_type"]}]「{row["section_title"]}」'
             )
 
         history_block = "\n".join(history_lines) if history_lines else "（尚無歷史內容）"
-
-        # 若有需要排除的大分類，加入提示
-        excluded_block = ""
-        if excluded_categories:
-            excluded_block = (
-                f"⚠️ 另一篇文章已選用「{excluded_categories}」大分類，\n"
-                f"本篇文章「不得」再從「{excluded_categories}」中選擇領域。\n"
-                "請改選其他大分類下的次領域。"
-            )
-        else:
-            excluded_block = "無特定排除分類。請任意選擇大分類下的次領域。"
+        forbidden_block = forbidden_topics if forbidden_topics else "（本日尚無已生成主題）"
 
         return DAILY_SINGLE_SECTION_GENERATION_PROMPT_TEMPLATE.format(
-            section_label=section_label,
             history_block=history_block,
-            excluded_categories=excluded_block,
+            forbidden_topics=forbidden_block,
         )
 
     @staticmethod
@@ -295,7 +255,7 @@ class DailyMessageEvent(commands.Cog):
             pass
 
         # 全部失敗，輸出完整原始內容供調試
-        print(f"[DailyMessage] ❌ 解析 AI 回傳 JSON 失敗（所有容錯層均無效）")
+        print("[DailyMessage] 解析 AI 回傳 JSON 失敗（所有容錯層均無效）")
         print(f"[DailyMessage] 原始回傳長度: {len(response_text)} 字元")
         print(f"[DailyMessage] 原始回傳內容:\n{response_text[:800]}")
         if len(response_text) > 800:
@@ -365,7 +325,7 @@ class DailyMessageEvent(commands.Cog):
             解析後的 dict 或 None
         """
         if not self._ai_client:
-            print("[DailyMessage] ❌ DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
+            print("[DailyMessage] DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
             return None
 
         max_retries = DAILY_AI_MAX_RETRIES
@@ -386,9 +346,9 @@ class DailyMessageEvent(commands.Cog):
                     }
                     if try_json:
                         kwargs["response_format"] = {"type": "json_object"}
-                        print(f"[DailyMessage] 🔧 嘗試 JSON Mode (temp={current_temp:.2f})")
+                        print(f"[DailyMessage] 嘗試 JSON Mode (temp={current_temp:.2f})")
                     else:
-                        print(f"[DailyMessage] 🔧 文字模式 (temp={current_temp:.2f})")
+                        print(f"[DailyMessage] 文字模式 (temp={current_temp:.2f})")
 
                     response = self._ai_client.chat.completions.create(**kwargs)
                     content = response.choices[0].message.content or ""
@@ -397,16 +357,16 @@ class DailyMessageEvent(commands.Cog):
                     usage_str = f"prompt={usage.prompt_tokens} completion={usage.completion_tokens}" if usage else "N/A"
 
                     if not content:
-                        print(f"[DailyMessage] ⚠️ API 回傳空內容！finish_reason={finish} usage=({usage_str})")
+                        print(f"[DailyMessage] API 回傳空內容！finish_reason={finish} usage=({usage_str})")
 
                     return content
 
                 text = await asyncio.to_thread(_sync_call)
                 if not text:
                     # 空內容：若為 JSON Mode 則直接視為該模式不支援，下次不再嘗試
-                    print(f"[DailyMessage] ⚠️ 第 {attempt}/{max_retries} 次嘗試回傳空內容")
+                    print(f"[DailyMessage] 第 {attempt}/{max_retries} 次嘗試回傳空內容")
                     if try_json:
-                        print(f"[DailyMessage] 💡 JSON Mode 回傳空內容，後續嘗試將跳過 JSON Mode")
+                        print(f"[DailyMessage] JSON Mode 回傳空內容，後續嘗試將跳過 JSON Mode")
                         use_json_mode = False
                     continue
 
@@ -414,366 +374,281 @@ class DailyMessageEvent(commands.Cog):
                 if parsed is not None:
                     return parsed
 
-                print(f"[DailyMessage] ⚠️ 第 {attempt}/{max_retries} 次嘗試失敗（解析錯誤）")
+                print(f"[DailyMessage] 第 {attempt}/{max_retries} 次嘗試失敗（解析錯誤）")
 
             except Exception as e:
-                print(f"[DailyMessage] ⚠️ 第 {attempt}/{max_retries} 次嘗試異常: {type(e).__name__}: {e}")
+                print(f"[DailyMessage] 第 {attempt}/{max_retries} 次嘗試異常: {type(e).__name__}: {e}")
 
-        print(f"[DailyMessage] ❌ DeepSeek API 呼叫失敗（已重試 {max_retries} 次）")
+        print(f"[DailyMessage] DeepSeek API 呼叫失敗（已重試 {max_retries} 次）")
         return None
 
-    async def _generate_sections(self, existing_dicts: List[Dict[str, Any]]) -> Optional[Dict[str, str]]:
-        """### 生成每日知識內容（分兩次 API 調用，每次生成一篇）
-
-        拆分策略：
-        1. 先生成 section1
-        2. 提取 section1 的大分類
-        3. 生成 section2（排除 section1 的大分類，防止撞類）
+    async def _generate_section(
+        self,
+        existing_history: List[Dict[str, Any]],
+        forbidden_topics: str = "",
+    ) -> Optional[Dict[str, str]]:
+        """### 生成單篇知識內容
 
         Args:
-            existing_dicts: 歷史內容清單
+            existing_history: 歷史內容清單（不含當日）
+            forbidden_topics: 當日已生成主題（注入為禁止主題）
 
         Returns:
-            合併後的內容 dict（含 section1_ / section2_ 前綴）或 None
+            單篇內容 dict（含 section_quick_learn）或 None
         """
-        # ── 生成 section1 ──
-        prompt1 = self._build_single_section_prompt("第一則", existing_dicts)
-        result1 = await self._call_deepseek(prompt1, max_tokens=DAILY_GENERATION_MAX_TOKENS, use_json_mode=False)
+        prompt = self._build_single_section_prompt(existing_history, forbidden_topics)
+        result = await self._call_deepseek(prompt, max_tokens=DAILY_GENERATION_MAX_TOKENS, use_json_mode=False)
 
-        if result1 is None:
-            print("[DailyMessage] ❌ section1 生成失敗")
+        if result is None:
+            print("[DailyMessage] 單篇生成失敗（API/解析錯誤）")
             return None
 
-        # 驗證 section1 的必要欄位
-        s1_required = ["section_type", "section_title", "section_summary", "section_detail", "section_sources"]
-        for key in s1_required:
-            if key not in result1 or not result1[key]:
-                print(f"[DailyMessage] ⚠️ section1 生成缺少必要欄位: {key}")
+        # 驗證必要欄位（含快速學習）
+        required = ["section_type", "section_title", "section_summary", "section_detail", "section_quick_learn", "section_sources"]
+        for key in required:
+            if key not in result or not result[key]:
+                print(f"[DailyMessage] 生成缺少必要欄位: {key}")
                 return None
 
-        # 提取 section1 的大分類，用於 section2 排除
-        s1_type = result1["section_type"]
-        s1_group = self._get_category_group(s1_type)
-        excluded = ""
-        if s1_group:
-            excluded = s1_group
-
-        # ── 生成 section2（排除 section1 的大分類） ──
-        prompt2 = self._build_single_section_prompt("第二則", existing_dicts, excluded_categories=excluded)
-        result2 = await self._call_deepseek(prompt2, max_tokens=DAILY_GENERATION_MAX_TOKENS, use_json_mode=False)
-
-        if result2 is None:
-            print("[DailyMessage] ❌ section2 生成失敗")
-            return None
-
-        s2_required = ["section_type", "section_title", "section_summary", "section_detail", "section_sources"]
-        for key in s2_required:
-            if key not in result2 or not result2[key]:
-                print(f"[DailyMessage] ⚠️ section2 生成缺少必要欄位: {key}")
-                return None
-
-        # ── 合併結果，加上 prefix ──
         merged = {
-            "section1_type": result1["section_type"],
-            "section1_title": result1["section_title"],
-            "section1_summary": result1["section_summary"],
-            "section1_detail": result1["section_detail"],
-            "section1_sources": result1["section_sources"],
-            "section2_type": result2["section_type"],
-            "section2_title": result2["section_title"],
-            "section2_summary": result2["section_summary"],
-            "section2_detail": result2["section_detail"],
-            "section2_sources": result2["section_sources"],
+            "section_type": result["section_type"],
+            "section_title": result["section_title"],
+            "section_summary": result["section_summary"],
+            "section_detail": result["section_detail"],
+            "section_quick_learn": result["section_quick_learn"],
+            "section_sources": result["section_sources"],
         }
 
-        print(f"[DailyMessage] ✅ 兩篇內容生成成功 (s1={s1_type}, s2={result2['section_type']})")
+        print(f"[DailyMessage] 單篇生成成功 ({merged['section_type']})")
         return merged
 
-    async def _verify_sections(self, content: dict) -> Optional[Dict[str, str]]:
-        """### 二次驗證內容正確性（分兩次 API 調用，每次驗證一篇 + 本地拼接 overall_notes）
+    async def _verify_section(self, content: Dict[str, Any]) -> Optional[Dict[str, str]]:
+        """### 二次驗證單篇文章正確性
 
         Args:
-            content: 已生成的內容 dict（含 section1_ / section2_ 前綴）
+            content: 已生成的單篇內容 dict
 
         Returns:
-            驗證結果 dict（7 個欄位）或 None
+            驗證結果 dict（verification / credibility / evidence）或 None
         """
-        # ── 驗證 section1 ──
-        prompt1 = self._build_single_verification_prompt(
-            content["section1_type"],
-            content["section1_title"],
-            content["section1_summary"],
-            content["section1_detail"],
-            content["section1_sources"],
+        prompt = self._build_single_verification_prompt(
+            content["section_type"],
+            content["section_title"],
+            content["section_summary"],
+            content["section_detail"],
+            content["section_sources"],
         )
-        v1 = await self._call_deepseek(prompt1, max_tokens=DAILY_VERIFICATION_MAX_TOKENS, use_json_mode=False)
+        v = await self._call_deepseek(prompt, max_tokens=DAILY_VERIFICATION_MAX_TOKENS, use_json_mode=False)
 
-        if v1 is None:
-            print("[DailyMessage] ❌ section1 驗證失敗（API/解析錯誤）")
+        if v is None:
+            print("[DailyMessage] 單篇驗證失敗（API/解析錯誤）")
             return None
 
-        v1_required = ["verification", "credibility", "evidence"]
-        for key in v1_required:
-            if key not in v1 or not v1[key]:
-                print(f"[DailyMessage] ⚠️ section1 驗證缺少必要欄位: {key}")
+        v_required = ["verification", "credibility", "evidence"]
+        for key in v_required:
+            if key not in v or not v[key]:
+                print(f"[DailyMessage] 驗證缺少必要欄位: {key}")
                 return None
 
-        # ── 驗證 section2 ──
-        prompt2 = self._build_single_verification_prompt(
-            content["section2_type"],
-            content["section2_title"],
-            content["section2_summary"],
-            content["section2_detail"],
-            content["section2_sources"],
-        )
-        v2 = await self._call_deepseek(prompt2, max_tokens=DAILY_VERIFICATION_MAX_TOKENS, use_json_mode=False)
+        print(f"[DailyMessage] 驗證完成: {v['verification']}(可信度{v['credibility']})")
+        return v
 
-        if v2 is None:
-            print("[DailyMessage] ❌ section2 驗證失敗（API/解析錯誤）")
-            return None
+    async def _generate_and_verify_article(
+        self,
+        existing_history: List[Dict[str, Any]],
+        forbidden_topics: str = "",
+    ) -> Optional[Dict[str, str]]:
+        """### 生成 + 驗證單篇文章（獨立重試循環）
 
-        v2_required = ["verification", "credibility", "evidence"]
-        for key in v2_required:
-            if key not in v2 or not v2[key]:
-                print(f"[DailyMessage] ⚠️ section2 驗證缺少必要欄位: {key}")
-                return None
+        生成失敗重試（DAILY_AI_MAX_RETRIES）；驗證失敗重試（DAILY_VERIFY_MAX_RETRIES）；
+        驗證判定「不通過」則回到生成階段重新生成。
+        驗證全部重試失敗時，降級返回未驗證版本（沿用既有行為）。
 
-        # ── 本地拼接 overall_notes ──
-        overall_notes = (
-            f"第一則: {v1['verification']}(可信度{v1['credibility']}); "
-            f"第二則: {v2['verification']}(可信度{v2['credibility']})"
-        )
+        Args:
+            existing_history: 歷史內容清單（不含當日）
+            forbidden_topics: 當日已生成主題（注入為禁止主題）
 
-        merged_verification = {
-            "section1_verification": v1["verification"],
-            "section1_credibility": v1["credibility"],
-            "section1_evidence": v1["evidence"],
-            "section2_verification": v2["verification"],
-            "section2_credibility": v2["credibility"],
-            "section2_evidence": v2["evidence"],
-            "overall_notes": overall_notes,
-        }
+        Returns:
+            完整文章 dict（含 section_credibility / verified_at / verification_notes）或 None
+        """
+        gen_max = DAILY_AI_MAX_RETRIES
+        ver_max = DAILY_VERIFY_MAX_RETRIES
 
-        print(f"[DailyMessage] ✅ 兩篇驗證完成 {overall_notes}")
-        return merged_verification
+        for gen_attempt in range(1, gen_max + 1):
+            generated = await self._generate_section(existing_history, forbidden_topics)
+            if generated is None:
+                print(f"[DailyMessage] 生成嘗試 {gen_attempt}/{gen_max} 失敗（API/解析錯誤）")
+                if gen_attempt < gen_max:
+                    await asyncio.sleep(DAILY_AI_RETRY_BASE_DELAY * (2 ** (gen_attempt - 1)))
+                continue
+
+            # 驗證（獨立重試：API 失敗僅重試驗證，不重新生成）
+            for ver_attempt in range(1, ver_max + 1):
+                verification = await self._verify_section(generated)
+                if verification is None:
+                    print(f"[DailyMessage] 驗證嘗試 {ver_attempt}/{ver_max} 失敗（API/解析錯誤），重試驗證")
+                    if ver_attempt < ver_max:
+                        await asyncio.sleep(DAILY_VERIFY_RETRY_BASE_DELAY * (2 ** (ver_attempt - 1)))
+                    continue
+
+                # 驗證成功，檢查內容是否不合格
+                if verification["verification"] == "不通過":
+                    print("[DailyMessage] 驗證判定內容不合格，回到生成階段")
+                    break  # 跳出驗證循環，回到生成循環
+
+                # 驗證通過（通過/有疑慮均可接受）
+                now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                return {
+                    **generated,
+                    "section_credibility": verification["credibility"],
+                    "verified_at": now_str,
+                    "verification_notes": f"{verification['verification']}(可信度{verification['credibility']})",
+                }
+
+            # 驗證全部重試失敗（verification 仍為 None）：降級使用未驗證內容
+            print("[DailyMessage] 驗證階段全部失敗，使用未驗證內容")
+            now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+            return {
+                **generated,
+                "section_credibility": "未驗證",
+                "verified_at": "",
+                "verification_notes": "（驗證失敗，請自行查證）",
+            }
+
+        return None
 
     @tasks.loop(time=DAILY_MESSAGE_TIME)
     async def daily_message_task(self):
         """### 每日訊息任務
 
-        檢查資料庫 → 若已有今日內容則跳過 → 否則呼叫 AI 生成（兩階段含驗證）
-        → 存入 DB → 發送 Embed（頻道簡述）→ 建立討論串並貼上詳細資料
+        檢查當日已入庫篇數 → 未達 DAILY_ARTICLES_PER_DAY 則逐篇「生成→驗證→入庫」，
+        並將當日已生成主題注入為禁止主題（避免同天主題類似）→ 齊全後發送 Embed + 討論串。
+        重啟／補跑時自動只補缺的篇數。
         """
         now = datetime.now(TZ)
         date_str = now.strftime("%Y-%m-%d")
-        print(f"--- 📅 每日訊息任務開始 ({date_str}) ---")
+        print(f"--- 每日訊息任務開始 ({date_str}) ---")
 
         try:
-            # 1. 檢查是否已有今日內容
-            existing = await dailyContentDB.get_daily_content(date_str)
-            if existing:
-                print(f"[DailyMessage] ✅ 今日 ({date_str}) 已有內容，跳過生成")
+            # 1. 檢查當日已入庫篇數
+            today_articles = await dailyContentDB.get_daily_contents(date_str)
+            if len(today_articles) >= DAILY_ARTICLES_PER_DAY:
+                print(f"[DailyMessage] 今日 ({date_str}) 已有 {len(today_articles)} 篇，跳過生成")
                 return
 
-            # 2. 取得歷史內容供去重
+            # 2. 歷史內容（不含當日），供避免重複
             all_contents = await dailyContentDB.get_all_contents()
-            existing_dicts = [dict(row) for row in all_contents]
+            history = [dict(row) for row in all_contents if row["date"] != date_str]
 
-            # 3. 階段一：生成內容（最多 DAILY_AI_MAX_RETRIES 次）
-            generated = None
-            verification = None
-            gen_max = DAILY_AI_MAX_RETRIES
-            ver_max = DAILY_VERIFY_MAX_RETRIES
-
-            for gen_attempt in range(1, gen_max + 1):
-                generated = await self._generate_sections(existing_dicts)
-                if generated is None:
-                    print(f"[DailyMessage] ⚠️ 生成嘗試 {gen_attempt}/{gen_max} 失敗（API/解析錯誤）")
-                    if gen_attempt < gen_max:
-                        await asyncio.sleep(DAILY_AI_RETRY_BASE_DELAY * (2 ** (gen_attempt - 1)))
-                    continue
-
-                # 4. 階段二：二次驗證（獨立重試：API 失敗僅重試驗證，不重新生成）
-                for ver_attempt in range(1, ver_max + 1):
-                    verification = await self._verify_sections(generated)
-                    if verification is None:
-                        print(f"[DailyMessage] ⚠️ 驗證嘗試 {ver_attempt}/{ver_max} 失敗（API/解析錯誤），重試驗證")
-                        if ver_attempt < ver_max:
-                            await asyncio.sleep(DAILY_VERIFY_RETRY_BASE_DELAY * (2 ** (ver_attempt - 1)))
-                        continue
-
-                    # 驗證成功，檢查內容是否不合格
-                    s1_verdict = verification.get("section1_verification", "")
-                    s2_verdict = verification.get("section2_verification", "")
-                    if s1_verdict == "不通過" or s2_verdict == "不通過":
-                        print(f"[DailyMessage] ⚠️ 驗證判定內容不合格 "
-                              f"(s1={s1_verdict}, s2={s2_verdict})，回到生成階段")
-                        break  # 跳出驗證循環，回到生成循環
-
-                    # 驗證通過（通過/有疑慮均可接受）
-                    print(f"[DailyMessage] ✅ 驗證通過 (s1={s1_verdict}, s2={s2_verdict})")
+            # 3. 逐篇生成：注入當日已生成主題為禁止主題
+            for i in range(len(today_articles), DAILY_ARTICLES_PER_DAY):
+                forbidden_topics = "\n".join(
+                    f'- [{a["section_type"]}]「{a["section_title"]}」' for a in today_articles
+                )
+                article = await self._generate_and_verify_article(history, forbidden_topics)
+                if article is None:
+                    print(f"[DailyMessage] 第 {i + 1} 篇生成失敗（重試耗盡），停止今日生成")
                     break
 
-                # 如果驗證通過了（verification 不為 None 且非「不通過」），跳出生成循環
-                if verification is not None:
-                    s1_verdict = verification.get("section1_verification", "")
-                    s2_verdict = verification.get("section2_verification", "")
-                    if s1_verdict != "不通過" and s2_verdict != "不通過":
-                        break
-                else:
-                    # 驗證全部重試失敗（verification 仍為 None），繼續生成循環
-                    print(f"[DailyMessage] ⚠️ 驗證階段全部失敗 ({ver_max} 次)，回到生成階段")
-                    verification = None
-
-            # 最終檢查
-            if generated is None:
-                print("[DailyMessage] ❌ 內容生成失敗，今日不發送")
-                return
-            if verification is None:
-                print("[DailyMessage] ⚠️ 驗證階段最終失敗，使用未驗證內容發送")
-
-            # 5. 決定最終內容與可信度
-            now_str = now.strftime("%Y-%m-%d %H:%M:%S")
-            verified_at_str = now_str if verification else ""
-            verification_notes = verification.get("overall_notes", "") if verification else "（驗證失敗，請自行查證）"
-
-            # 使用驗證結果中的可信度（若驗證成功），否則預設為「未驗證」
-            s1_cred = verification.get("section1_credibility", "未驗證") if verification else "未驗證"
-            s2_cred = verification.get("section2_credibility", "未驗證") if verification else "未驗證"
-
-            # 6. 存入資料庫
-            await dailyContentDB.set_daily_content(
-                date=date_str,
-                section1_type=generated["section1_type"],
-                section1_title=generated["section1_title"],
-                section1_summary=generated["section1_summary"],
-                section1_detail=generated["section1_detail"],
-                section1_sources=generated["section1_sources"],
-                section1_credibility=s1_cred,
-                section2_type=generated["section2_type"],
-                section2_title=generated["section2_title"],
-                section2_summary=generated["section2_summary"],
-                section2_detail=generated["section2_detail"],
-                section2_sources=generated["section2_sources"],
-                section2_credibility=s2_cred,
-                generated_at=now_str,
-                verified_at=verified_at_str,
-                verification_notes=verification_notes,
-            )
-            print(f"[DailyMessage] ✅ 已儲存 {date_str} 的每日內容")
-
-            # 6.5 匯出為 Markdown 文章（每篇獨立 .md 檔案）
-            s1_article_data = {
-                "section_type": generated["section1_type"],
-                "section_title": generated["section1_title"],
-                "section_summary": generated["section1_summary"],
-                "section_detail": generated["section1_detail"],
-                "section_sources": generated["section1_sources"],
-                "section_credibility": s1_cred,
-                "generated_at": now_str,
-                "verified_at": verified_at_str,
-                "verification_notes": verification_notes,
-            }
-            save_article_md(s1_article_data, date_str, 1)
-
-            s2_article_data = {
-                "section_type": generated["section2_type"],
-                "section_title": generated["section2_title"],
-                "section_summary": generated["section2_summary"],
-                "section_detail": generated["section2_detail"],
-                "section_sources": generated["section2_sources"],
-                "section_credibility": s2_cred,
-                "generated_at": now_str,
-                "verified_at": verified_at_str,
-                "verification_notes": verification_notes,
-            }
-            save_article_md(s2_article_data, date_str, 2)
-
-            # 7. 發送到頻道
-            if not DAILY_CHANNEL:
-                print("[DailyMessage] ❌ DAILY_CHANNEL 未設定，無法發送")
-                return
-
-            channel = self.bot.get_channel(DAILY_CHANNEL)
-            if channel is None:
-                print(f"[DailyMessage] ❌ 無法取得頻道 ID {DAILY_CHANNEL}")
-                return
-
-            # 準備顯示用的 content dict（加入驗證資訊）
-            display_content = {
-                "date": date_str,
-                "section1_type": generated["section1_type"],
-                "section1_title": generated["section1_title"],
-                "section1_summary": generated["section1_summary"],
-                "section1_credibility": s1_cred,
-                "section2_type": generated["section2_type"],
-                "section2_title": generated["section2_title"],
-                "section2_summary": generated["section2_summary"],
-                "section2_credibility": s2_cred,
-                "verified_at": verified_at_str,
-                "verification_notes": verification_notes,
-            }
-
-            embed = build_daily_embed(display_content)
-            message = await channel.send(embed=embed)
-            print(f"[DailyMessage] ✅ 已發送每日訊息到頻道 {DAILY_CHANNEL}")
-
-            # 8. 建立討論串並貼上詳細資料
-            try:
-                thread = await message.create_thread(
-                    name=f"📖 詳細資料 — {date_str}",
-                    auto_archive_duration=1440,  # 24 小時後自動封存
+                now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                await dailyContentDB.set_daily_content(
+                    date=date_str,
+                    section_type=article["section_type"],
+                    section_title=article["section_title"],
+                    section_summary=article["section_summary"],
+                    section_detail=article["section_detail"],
+                    section_quick_learn=article["section_quick_learn"],
+                    section_sources=article["section_sources"],
+                    section_credibility=article["section_credibility"],
+                    generated_at=now_str,
+                    verified_at=article["verified_at"],
+                    verification_notes=article["verification_notes"],
                 )
+                print(f"[DailyMessage] 已儲存第 {i + 1} 篇：{article['section_title']}")
 
-                # 準備完整的詳細內容 dict
-                detail_content = {
-                    "date": date_str,
-                    "section1_type": generated["section1_type"],
-                    "section1_title": generated["section1_title"],
-                    "section1_detail": generated["section1_detail"],
-                    "section1_sources": generated["section1_sources"],
-                    "section1_credibility": s1_cred,
-                    "section2_type": generated["section2_type"],
-                    "section2_title": generated["section2_title"],
-                    "section2_detail": generated["section2_detail"],
-                    "section2_sources": generated["section2_sources"],
-                    "section2_credibility": s2_cred,
-                    "verified_at": verified_at_str,
-                    "verification_notes": verification_notes,
-                }
+                # 重新讀取當日文章，供下一輪注入禁止主題
+                today_articles = await dailyContentDB.get_daily_contents(date_str)
 
-                detail_text = build_detail_content(detail_content)
-
-                # 若詳細內容超過 Discord 2000 字限制，分段發送
-                max_len = 1900
-                if len(detail_text) <= max_len:
-                    await thread.send(detail_text)
-                else:
-                    # 分段：先發標題與第一則，再發第二則與驗證
-                    parts = []
-                    current = []
-                    current_len = 0
-                    for line in detail_text.split("\n"):
-                        line_len = len(line) + 1  # +1 for newline
-                        if current_len + line_len > max_len and current:
-                            parts.append("\n".join(current))
-                            current = [line]
-                            current_len = line_len
-                        else:
-                            current.append(line)
-                            current_len += line_len
-                    if current:
-                        parts.append("\n".join(current))
-
-                    for part in parts:
-                        await thread.send(part)
-
-                print(f"[DailyMessage] ✅ 已建立討論串並張貼詳細資料")
-            except Exception as e:
-                print(f"[DailyMessage] ⚠️ 建立討論串失敗: {e}")
+            # 4. 發送當日全部文章
+            today_articles = await dailyContentDB.get_daily_contents(date_str)
+            if not today_articles:
+                print("[DailyMessage] 今日無任何文章，不發送")
+                return
+            await self._send_daily(date_str, [dict(row) for row in today_articles])
 
         except Exception as e:
-            print(f"[DailyMessage] ❌ 每日訊息任務錯誤: {e}")
+            print(f"[DailyMessage] 每日訊息任務錯誤: {e}")
+
+    async def _send_daily(self, date_str: str, articles: List[Dict[str, Any]]) -> None:
+        """### 發送當日文章：Markdown 匯出 ＋ Embed（頻道）＋ 討論串（詳細資料）
+
+        Args:
+            date_str: 日期 YYYY-MM-DD
+            articles: 當日全部文章 dict 清單
+        """
+        # 1. 匯出 Markdown 文章（每篇獨立 .md 檔案）
+        for idx, article in enumerate(articles, 1):
+            save_article_md(article, date_str, idx)
+
+        # 2. 發送到頻道
+        if not DAILY_CHANNEL:
+            print("[DailyMessage] DAILY_CHANNEL 未設定，無法發送")
+            return
+
+        channel = self.bot.get_channel(DAILY_CHANNEL)
+        if channel is None:
+            print(f"[DailyMessage] 無法取得頻道 ID {DAILY_CHANNEL}")
+            return
+
+        embed = build_daily_embed(articles)
+        message = await channel.send(embed=embed)
+        print(f"[DailyMessage] 已發送每日訊息到頻道 {DAILY_CHANNEL}")
+
+        # 3. 建立討論串並貼上詳細資料
+        try:
+            thread = await message.create_thread(
+                name=f"詳細資料 — {date_str}",
+                auto_archive_duration=1440,  # 24 小時後自動封存
+            )
+
+            for article in articles:
+                detail_text = build_detail_content(article)
+                for part in self._split_long_text(detail_text):
+                    await thread.send(part)
+
+            print("[DailyMessage] 已建立討論串並張貼詳細資料")
+        except Exception as e:
+            print(f"[DailyMessage] 建立討論串失敗: {e}")
+
+    @staticmethod
+    def _split_long_text(text: str, max_len: int = 1900) -> List[str]:
+        """### 將長文字分段（Discord 訊息上限 2000 字元）
+
+        Args:
+            text: 原始文字
+            max_len: 單段最大長度
+
+        Returns:
+            分段後的清單
+        """
+        if len(text) <= max_len:
+            return [text]
+
+        parts: List[str] = []
+        current: List[str] = []
+        current_len = 0
+        for line in text.split("\n"):
+            line_len = len(line) + 1  # +1 for newline
+            if current_len + line_len > max_len and current:
+                parts.append("\n".join(current))
+                current = [line]
+                current_len = line_len
+            else:
+                current.append(line)
+                current_len += line_len
+        if current:
+            parts.append("\n".join(current))
+        return parts
 
     @daily_message_task.before_loop
     async def before_daily_message_task(self):
@@ -782,7 +657,7 @@ class DailyMessageEvent(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _startup_check(self) -> None:
-        """### 啟動後立即檢查：若今天尚未有內容則觸發一次
+        """### 啟動後立即檢查：若今天篇數不足則觸發一次
 
         解決 tasks.loop(time=...) 在啟動時間已過指定時刻時，
         要等到隔天才觸發的問題。

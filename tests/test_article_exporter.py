@@ -16,17 +16,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.article_exporter import build_article_md, save_article_md, _sanitize_filename, _date_to_folder
 
-# ── 測試資料 ──
+# ── 測試資料（單篇一筆結構，含快速學習） ──
+# 注意：detail 模擬 AI 輸出經 json.loads 解析後的實際換行（\n 為換行轉義）
 MOCK_SECTION = {
     "section_type": "認知心理學",
     "section_title": "認知失調理論：當行為與信念衝突時",
     "section_summary": "認知失調理論（Cognitive Dissonance Theory）由 Leon Festinger 於 1957 年提出，\n說明當個人同時持有兩種相互矛盾的心理認知（想法、信念、態度或行為）時，\n會產生一種心理上的不適感，驅使個體改變其中一項認知以減輕衝突。",
-    "section_detail": "【背景】\\n認知失調理論是社會心理學中最重要的動機理論之一。\\n\\n【核心內容】\\nFestinger 認為人類有追求內在一致性的基本需求。\\n\\n【知識價值】\\n小說創作：★★★★★\\n心理分析：★★★★★",
-    "section_sources": "Festinger, L. (1957). A Theory of Cognitive Dissonance. Stanford University Press.\\nTavris, C., & Aronson, E. (2007). Mistakes Were Made (But Not by Me). Harcourt.",
+    "section_quick_learn": "簡單說，當你的行為和想法互相矛盾時，心裡會不舒服，\n於是你會想辦法讓兩者一致，這就是認知失調。",
+    "section_detail": "## 背景\n認知失調理論是社會心理學中最重要的動機理論之一。\n\n## 核心內容與研究\n- Festinger 認為人類有追求內在一致性的基本需求。\n\n## 【知識價值】\n小說創作：★★★★★\n心理分析：★★★★★",
+    "section_sources": "Festinger, L. (1957). A Theory of Cognitive Dissonance. Stanford University Press.\nTavris, C., & Aronson, E. (2007). Mistakes Were Made (But Not by Me). Harcourt.",
     "section_credibility": "高",
     "generated_at": "2026-07-31 08:00:00",
     "verified_at": "2026-07-31 08:05:00",
-    "verification_notes": "第一則: 通過(可信度高); 第二則: 通過(可信度高)",
+    "verification_notes": "通過(可信度高)",
 }
 
 MOCK_DATE = "2026-07-31"
@@ -38,14 +40,14 @@ def test_sanitize_filename():
     assert "?" not in _sanitize_filename("不允許的?字元*:測試")
     assert "·" in _sanitize_filename("a/b/c")  # / 被替換為 ·
     assert len(_sanitize_filename("A" * 100)) <= 60
-    print("✅ _sanitize_filename 測試通過")
+    print("OK: _sanitize_filename 測試通過")
 
 
 def test_date_to_folder():
     """測試日期轉資料夾名稱"""
     assert _date_to_folder("2026-07-31") == "20260731"
     assert _date_to_folder("20260801") == "20260801"
-    print("✅ _date_to_folder 測試通過")
+    print("OK: _date_to_folder 測試通過")
 
 
 def test_build_article_md():
@@ -54,15 +56,15 @@ def test_build_article_md():
 
     # 檢查必備段落
     assert "cognitive" in md.lower() or "認知" in md, "應包含標題內容"
-    assert "---" in md, "應包含 YAML frontmatter"
-    assert "title:" in md, "frontmatter 應有 title"
-    assert "date:" in md, "frontmatter 應有 date"
-    assert "category:" in md, "frontmatter 應有 category"
-    assert "credibility:" in md, "frontmatter 應有 credibility"
     assert "## 詳細內容" in md, "應有詳細內容小節"
+    assert "## 背景" in md, "detail 的 markdown 標題應保留"
+    assert "- Festinger" in md, "detail 的 markdown 列表應保留"
+    assert "## 快速學習" in md, "應有快速學習小節"
+    assert "簡單說，當你的行為和想法互相矛盾時" in md, "應包含快速學習內容"
     assert "## 參考資料" in md, "應有參考資料小節"
     assert "Festinger" in md, "應包含參考資料內容"
-    assert "## 知識價值" in md, "應有知識價值小節"
+    assert "## 【知識價值】" in md, "知識價值標題應為二級標題+括號"
+    assert "小說創作：★★★★★" in md, "知識價值星級內容應輸出"
     assert "可信度評級" in md, "應有可信度資訊"
     assert "## 驗證資訊" in md, "應有驗證資訊小節"
     assert "AI 生成" in md, "應有免責聲明"
@@ -70,15 +72,26 @@ def test_build_article_md():
     # 摘要應為引言區塊
     assert "> **摘要**" in md, "摘要應為 blockquote 格式"
 
-    print("✅ build_article_md 測試通過")
+    print("OK: build_article_md 測試通過")
+
+
+def test_build_article_md_legacy_kv():
+    """測試舊格式【知識價值】（無 ## 前綴）相容解析"""
+    legacy = {
+        **MOCK_SECTION,
+        "section_detail": "## 背景\n認知失調理論。\n\n【知識價值】\n小說創作：★★★★★",
+    }
+    md = build_article_md(legacy, MOCK_DATE, 1)
+    assert "## 【知識價值】" in md, "舊格式應被統一輸出為 ## 【知識價值】"
+    assert "小說創作：★★★★★" in md, "應包含星級內容"
+    # 不應殘留未處理的舊標題行
+    assert "【知識價值】\n【知識價值】" not in md
+    print("OK: 舊格式知識價值相容測試通過")
 
 
 def test_save_article_md():
     """測試檔案寫入"""
     with tempfile.TemporaryDirectory() as tmp_dir:
-        from utils.article_exporter import ARTICLES_DIR
-
-        # 用暫存目錄覆蓋 ARTICLES_DIR
         original = os.path.join(tmp_dir, "article_md")
         result = save_article_md(MOCK_SECTION, MOCK_DATE, 1, articles_dir=original)
 
@@ -91,14 +104,16 @@ def test_save_article_md():
         with open(result, "r", encoding="utf-8") as f:
             content = f.read()
         assert "Festinger" in content
-        assert "---" in content
+        assert "## 快速學習" in content
+        assert "## 【知識價值】" in content
 
-        print(f"✅ save_article_md 測試通過 ({result})")
+        print(f"OK: save_article_md 測試通過 ({result})")
 
 
 if __name__ == "__main__":
     test_sanitize_filename()
     test_date_to_folder()
     test_build_article_md()
+    test_build_article_md_legacy_kv()
     test_save_article_md()
-    print("🎉 所有測試通過！")
+    print("所有測試通過！")

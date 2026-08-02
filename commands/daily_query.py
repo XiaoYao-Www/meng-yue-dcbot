@@ -39,17 +39,17 @@ class DailyQueryCommand(commands.Cog):
         await interaction.response.defer()
 
         try:
-            content = await dailyContentDB.get_daily_content(date)
+            contents = await dailyContentDB.get_daily_contents(date)
 
-            if content is None:
+            if not contents:
                 await interaction.followup.send(
-                    f"📭 **{date}** 尚無每日知識內容",
+                    f"**{date}** 尚無每日知識內容",
                     ephemeral=True,
                 )
                 return
 
-            # 使用共用 Embed 建置函式（新 schema 相容）
-            embed = build_daily_embed(content)
+            # 使用共用 Embed 建置函式（單篇一筆 schema）
+            embed = build_daily_embed(contents)
             await interaction.followup.send(embed=embed)
 
         except Exception as e:

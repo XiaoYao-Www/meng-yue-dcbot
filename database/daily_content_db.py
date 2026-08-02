@@ -6,22 +6,18 @@ from config import DB_PATH
 
 
 class DailyContentRow(TypedDict):
-    date: str
-    section1_type: str          # 心理學／社會學
-    section1_title: str
-    section1_summary: str       # 頻道簡述
-    section1_detail: str        # 討論串詳細資料
-    section1_sources: str       # 出處引用
-    section1_credibility: str   # 可信度評級
-    section2_type: str          # 哲學／神話／神祕學
-    section2_title: str
-    section2_summary: str       # 頻道簡述
-    section2_detail: str        # 討論串詳細資料
-    section2_sources: str       # 出處引用
-    section2_credibility: str   # 可信度評級
+    id: int
+    date: str                  # 日期 YYYY-MM-DD（同一天可有多筆）
+    section_type: str          # 次領域（如「犯罪心理學」）
+    section_title: str
+    section_summary: str       # 頻道簡述
+    section_detail: str        # 討論串詳細資料
+    section_quick_learn: str   # 快速學習（新手速懂區塊）
+    section_sources: str       # 出處引用
+    section_credibility: str   # 可信度評級
     generated_at: str
-    verified_at: str            # 驗證時間
-    verification_notes: str     # 驗證備註
+    verified_at: str           # 驗證時間
+    verification_notes: str    # 驗證備註
 
 
 class DailyContentDatabase:
@@ -75,7 +71,7 @@ class DailyContentDatabase:
             await self.setup()
 
     async def setup(self) -> None:
-        """初始化表格（含舊 schema 遷移）"""
+        """初始化表格（含舊 schema 遷移：雙篇一行 → 單篇一行）"""
         if self.db is None:
             await self.connect()
 
@@ -86,131 +82,178 @@ class DailyContentDatabase:
             )
             table_exists = await cursor.fetchone()
 
+            needs_legacy_split = False
             if table_exists:
-                # 檢查是否有新欄位（section1_type）來判斷 schema 版本
                 col_cursor = await self.db.execute("PRAGMA table_info(daily_content)")
                 columns = [row[1] async for row in col_cursor]
 
-                if "section1_type" not in columns:
-                    # 舊 schema：重新命名舊表，建立新表
-                    print("[DailyContentDB] ⚠️ 偵測到舊版 schema，進行遷移...")
+                if "section1_type" in columns:
+                    # 舊版雙篇 schema（一天一筆、含 section1_/section2_ 欄位）：
+                    # 保留舊表，重建新表後拆行遷移
+                    print("[DailyContentDB] 偵測到舊版雙篇 schema，進行單篇化遷移...")
+                    await self.db.execute("ALTER TABLE daily_content RENAME TO daily_content_legacy")
+                    await self.db.commit()
+                    needs_legacy_split = True
+                elif "section_type" not in columns:
+                    # 更舊的未知 schema：不嘗試映射，保留舊表並重建新表
+                    print("[DailyContentDB] 偵測到未知舊版 schema，保留舊表並重建新表...")
                     await self.db.execute("ALTER TABLE daily_content RENAME TO daily_content_old")
                     await self.db.commit()
 
+            # 建立新表：一篇一筆，同一天可有多筆（date 建索引供查詢）
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS daily_content (
-                    date                  TEXT PRIMARY KEY,
-                    section1_type         TEXT NOT NULL,
-                    section1_title        TEXT NOT NULL,
-                    section1_summary      TEXT NOT NULL,
-                    section1_detail       TEXT NOT NULL,
-                    section1_sources      TEXT NOT NULL,
-                    section1_credibility  TEXT NOT NULL,
-                    section2_type         TEXT NOT NULL,
-                    section2_title        TEXT NOT NULL,
-                    section2_summary      TEXT NOT NULL,
-                    section2_detail       TEXT NOT NULL,
-                    section2_sources      TEXT NOT NULL,
-                    section2_credibility  TEXT NOT NULL,
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date                  TEXT NOT NULL,
+                    section_type          TEXT NOT NULL,
+                    section_title         TEXT NOT NULL,
+                    section_summary       TEXT NOT NULL,
+                    section_detail        TEXT NOT NULL,
+                    section_quick_learn   TEXT NOT NULL DEFAULT '',
+                    section_sources       TEXT NOT NULL,
+                    section_credibility   TEXT NOT NULL DEFAULT '未驗證',
                     generated_at          TEXT NOT NULL,
                     verified_at           TEXT NOT NULL DEFAULT '',
                     verification_notes    TEXT NOT NULL DEFAULT ''
                 )
             """)
+            await self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_daily_content_date ON daily_content(date)"
+            )
             await self.db.commit()
 
-            # 若存在舊表，嘗試複製相容資料並刪除
-            try:
-                await self.db.execute(
-                    "SELECT COUNT(*) FROM daily_content_old"
-                )
-                old_exists = True
-            except Exception:
-                old_exists = False
+            if needs_legacy_split:
+                await self._migrate_legacy_rows()
 
-            if old_exists:
-                print("[DailyContentDB] ℹ️ 舊表 daily_content_old 仍存在，可手動刪除")
-                # 不自動刪除，保留以備回查
+    async def _migrate_legacy_rows(self) -> None:
+        """### 將舊雙篇表 daily_content_legacy 每筆拆成兩行單篇插入新表
+
+        舊表結構：date（PK）+ section1_* 六欄 + section2_* 六欄。
+        新表結構：每筆一篇，同一天多筆，不再區分第一則／第二則。
+        舊資料沒有快速學習欄位，遷移後為空字串（顯示端自動跳過）。
+        """
+        try:
+            async with self.db.execute("SELECT * FROM daily_content_legacy") as cursor:
+                rows = await cursor.fetchall()
+
+            inserted = 0
+            skipped = 0
+            for row in rows:
+                r = dict(row)
+                date = r.get("date", "")
+                generated_at = r.get("generated_at", "")
+                verified_at = r.get("verified_at", "")
+                notes = r.get("verification_notes", "")
+
+                for prefix in ("section1", "section2"):
+                    title = r.get(f"{prefix}_title", "")
+                    if not title:
+                        skipped += 1
+                        continue
+                    await self.db.execute(
+                        """
+                        INSERT INTO daily_content
+                            (date, section_type, section_title, section_summary,
+                             section_detail, section_quick_learn, section_sources,
+                             section_credibility, generated_at, verified_at,
+                             verification_notes)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            date,
+                            r.get(f"{prefix}_type", ""),
+                            title,
+                            r.get(f"{prefix}_summary", ""),
+                            r.get(f"{prefix}_detail", ""),
+                            "",
+                            r.get(f"{prefix}_sources", ""),
+                            r.get(f"{prefix}_credibility", "未驗證"),
+                            generated_at,
+                            verified_at,
+                            notes,
+                        ),
+                    )
+                    inserted += 1
+            await self.db.commit()
+            print(
+                f"[DailyContentDB] 單篇化遷移完成：舊表 {len(rows)} 筆 "
+                f"→ 新表 {inserted} 篇（跳過空欄位 {skipped} 筆）"
+            )
+        except Exception as e:
+            print(f"[DailyContentDB] 單篇化遷移失敗: {e}")
 
     ##### 寫入功能 #####
 
     async def set_daily_content(
         self,
         date: str,
-        section1_type: str,
-        section1_title: str,
-        section1_summary: str,
-        section1_detail: str,
-        section1_sources: str,
-        section1_credibility: str,
-        section2_type: str,
-        section2_title: str,
-        section2_summary: str,
-        section2_detail: str,
-        section2_sources: str,
-        section2_credibility: str,
+        section_type: str,
+        section_title: str,
+        section_summary: str,
+        section_detail: str,
+        section_quick_learn: str,
+        section_sources: str,
+        section_credibility: str,
         generated_at: str,
         verified_at: str = "",
         verification_notes: str = "",
     ) -> None:
-        """### 寫入每日內容（以 date 為 PK，同日期重複寫入會覆蓋）
+        """### 寫入一篇每日內容（每筆一篇文章，同一天可有多筆）
 
         Args:
             date: 日期 YYYY-MM-DD
-            section1_type: 第一則類型（心理學／社會學）
-            section1_title: 第一則標題
-            section1_summary: 第一則簡述（頻道用）
-            section1_detail: 第一則詳細資料（討論串用）
-            section1_sources: 第一則出處引用
-            section1_credibility: 第一則可信度評級
-            section2_type: 第二則類型（哲學／神話／神祕學）
-            section2_title: 第二則標題
-            section2_summary: 第二則簡述（頻道用）
-            section2_detail: 第二則詳細資料（討論串用）
-            section2_sources: 第二則出處引用
-            section2_credibility: 第二則可信度評級
+            section_type: 次領域（如「犯罪心理學」）
+            section_title: 標題
+            section_summary: 簡述（頻道用）
+            section_detail: 詳細資料（討論串用）
+            section_quick_learn: 快速學習（新手速懂區塊）
+            section_sources: 出處引用
+            section_credibility: 可信度評級
             generated_at: 生成時間
             verified_at: 驗證時間
             verification_notes: 驗證備註
         """
         await self._ensure_connection()
         async with self._lock:
-            await self.db.execute("""
-                INSERT OR REPLACE INTO daily_content
-                    (date, section1_type, section1_title, section1_summary, section1_detail,
-                     section1_sources, section1_credibility,
-                     section2_type, section2_title, section2_summary, section2_detail,
-                     section2_sources, section2_credibility,
-                     generated_at, verified_at, verification_notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (date, section1_type, section1_title, section1_summary, section1_detail,
-                  section1_sources, section1_credibility,
-                  section2_type, section2_title, section2_summary, section2_detail,
-                  section2_sources, section2_credibility,
-                  generated_at, verified_at, verification_notes))
+            await self.db.execute(
+                """
+                INSERT INTO daily_content
+                    (date, section_type, section_title, section_summary,
+                     section_detail, section_quick_learn, section_sources,
+                     section_credibility, generated_at, verified_at,
+                     verification_notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    date, section_type, section_title, section_summary,
+                    section_detail, section_quick_learn, section_sources,
+                    section_credibility, generated_at, verified_at,
+                    verification_notes,
+                ),
+            )
             await self.db.commit()
 
     ##### 查詢功能 #####
 
-    async def get_daily_content(self, date: str) -> Optional[DailyContentRow]:
-        """### 查詢指定日期的每日內容
+    async def get_daily_contents(self, date: str) -> List[DailyContentRow]:
+        """### 查詢指定日期的所有每日內容（同一天多筆）
 
         Args:
             date: 日期 YYYY-MM-DD
 
         Returns:
-            DailyContentRow 或 None
+            該日全部文章（依 id 順序），無則空清單
         """
         await self._ensure_connection()
         try:
             async with self.db.execute(
-                "SELECT * FROM daily_content WHERE date = ?", (date,)
+                "SELECT * FROM daily_content WHERE date = ? ORDER BY id ASC", (date,)
             ) as cursor:
-                row = await cursor.fetchone()
-                return cast(DailyContentRow, dict(row)) if row else None
+                rows = await cursor.fetchall()
+                return [cast(DailyContentRow, dict(row)) for row in rows]
         except Exception as e:
             print(f"[DailyContentDB Error] 查詢失敗: {e}")
-            return None
+            return []
 
     async def get_all_contents(self) -> List[DailyContentRow]:
         """### 取得所有已儲存的每日內容（供 AI 去重使用）
@@ -220,7 +263,9 @@ class DailyContentDatabase:
         """
         await self._ensure_connection()
         try:
-            async with self.db.execute("SELECT * FROM daily_content ORDER BY date DESC") as cursor:
+            async with self.db.execute(
+                "SELECT * FROM daily_content ORDER BY date DESC, id ASC"
+            ) as cursor:
                 rows = await cursor.fetchall()
                 return [cast(DailyContentRow, dict(row)) for row in rows]
         except Exception as e:
