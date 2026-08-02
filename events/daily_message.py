@@ -1,23 +1,22 @@
 import asyncio
-import json
-import openai
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from discord import Embed, Color
 from discord.ext import commands, tasks
-from json_repair import repair_json
 
 from config import (
     TZ, DAILY_CHANNEL, DEEPSEEK_API_KEY, DAILY_MESSAGE_TIME,
-    DAILY_AI_MAX_RETRIES, DAILY_AI_RETRY_BASE_DELAY, DAILY_AI_MODEL,
-    DAILY_AI_BASE_URL, DAILY_GENERATION_MAX_TOKENS, DAILY_VERIFICATION_MAX_TOKENS,
+    DAILY_AI_MAX_RETRIES, DAILY_AI_RETRY_BASE_DELAY,
+    DAILY_GENERATION_PROFILE, DAILY_VERIFICATION_PROFILES,
+    DAILY_GENERATION_MAX_TOKENS, DAILY_VERIFICATION_MAX_TOKENS,
     DAILY_VERIFY_MAX_RETRIES, DAILY_VERIFY_RETRY_BASE_DELAY,
     DAILY_SINGLE_SECTION_GENERATION_PROMPT_TEMPLATE,
     DAILY_SINGLE_SECTION_VERIFICATION_PROMPT_TEMPLATE,
     DAILY_ARTICLES_PER_DAY,
 )
 from database.daily_content_db import dailyContentDB
+from utils.ai_client import DeepSeekClient
 from utils.article_exporter import save_article_md
 
 
@@ -127,18 +126,15 @@ def build_detail_content(content: Dict[str, Any]) -> str:
 class DailyMessageEvent(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._ai_client: openai.OpenAI | None = (
-            openai.OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DAILY_AI_BASE_URL)
-            if DEEPSEEK_API_KEY else None
-        )
+        self._ai = DeepSeekClient(DEEPSEEK_API_KEY) if DEEPSEEK_API_KEY else None
         self.daily_message_task.start()
 
     def cog_unload(self):
         """### 卸載插件
         """
         self.daily_message_task.cancel()
-        if self._ai_client:
-            self._ai_client.close()
+        if self._ai:
+            self._ai.close()
 
     @staticmethod
     def _build_single_section_prompt(
@@ -199,189 +195,6 @@ class DailyMessageEvent(commands.Cog):
             section_sources=section_sources,
         )
 
-    @staticmethod
-    def _parse_ai_response(response_text: str) -> Optional[Dict[str, str]]:
-        """### 解析 AI 回傳的 JSON（通用，含多層容錯 + json-repair 修復）
-
-        容錯策略（依序嘗試）：
-        1. 清除 Markdown ``` 程式碼塊包裹 → json.loads 直接解析
-        2. 大括號深度掃描提取 JSON 區塊 → json.loads 解析
-        3. json-repair 修復後解析（處理換行、尾逗號、截斷等常見 AI 錯誤）
-
-        Args:
-            response_text: AI 回傳文字
-
-        Returns:
-            dict 或 None（解析失敗）
-        """
-        text = response_text.strip()
-        if text.startswith("```"):
-            first_newline = text.find("\n")
-            if first_newline != -1:
-                text = text[first_newline + 1:]
-            if text.endswith("```"):
-                text = text[:-3].strip()
-
-        # 嘗試直接解析
-        try:
-            data = json.loads(text, strict=False)
-            return {k: str(v).strip() if v is not None else "" for k, v in data.items()}
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-        # 後備：用大括號深度掃描提取 JSON 區塊
-        extracted = DailyMessageEvent._extract_json_block(text)
-        if extracted:
-            try:
-                data = json.loads(extracted, strict=False)
-                return {k: str(v).strip() if v is not None else "" for k, v in data.items()}
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-            # 第三層：json-repair 修復後解析
-            try:
-                repaired = repair_json(extracted)
-                data = json.loads(repaired)
-                return {k: str(v).strip() if v is not None else "" for k, v in data.items()}
-            except Exception:
-                pass
-
-        # 最後手段：對整個原始文字嘗試 json-repair
-        try:
-            repaired = repair_json(text)
-            data = json.loads(repaired)
-            return {k: str(v).strip() if v is not None else "" for k, v in data.items()}
-        except Exception:
-            pass
-
-        # 全部失敗，輸出完整原始內容供調試
-        print("[DailyMessage] 解析 AI 回傳 JSON 失敗（所有容錯層均無效）")
-        print(f"[DailyMessage] 原始回傳長度: {len(response_text)} 字元")
-        print(f"[DailyMessage] 原始回傳內容:\n{response_text[:800]}")
-        if len(response_text) > 800:
-            print(f"[DailyMessage] ...（後續 {len(response_text) - 800} 字元已截斷）")
-        return None
-
-    @staticmethod
-    def _extract_json_block(text: str) -> Optional[str]:
-        """### 掃描字串中第一個合法的 JSON 物件（大括號深度計數）
-
-        Args:
-            text: 可能含 JSON 的原始文字
-
-        Returns:
-            提取出的 JSON 字串或 None
-        """
-        start = text.find("{")
-        if start == -1:
-            return None
-
-        depth = 0
-        in_string = False
-        escape = False
-        for i in range(start, len(text)):
-            ch = text[i]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\" and in_string:
-                escape = True
-                continue
-            if ch == '"':
-                in_string = not in_string
-                continue
-            if in_string:
-                continue
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[start:i + 1]
-
-        return None
-
-    async def _call_deepseek(
-        self,
-        prompt: str,
-        max_tokens: int = 2048,
-        use_json_mode: bool = True,
-        temperature: float = 0.7,
-    ) -> Optional[Dict[str, str]]:
-        """### 呼叫 DeepSeek API 生成內容（含自動重試 + 漸進式降級）
-
-        策略：
-        1. 優先嘗試 JSON Mode（response_format），若返回空 content 立即回退文字模式
-        2. 每次重試降低 temperature，提高輸出確定性
-        3. 無重試等待（API 無速率限制）
-
-        Args:
-            prompt: 提示詞
-            max_tokens: 最大 token 數
-            use_json_mode: 是否優先使用 JSON Mode
-            temperature: 初始 temperature（重試時會逐步降低）
-
-        Returns:
-            解析後的 dict 或 None
-        """
-        if not self._ai_client:
-            print("[DailyMessage] DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
-            return None
-
-        max_retries = DAILY_AI_MAX_RETRIES
-
-        for attempt in range(1, max_retries + 1):
-            # 漸進式降級：每次重試降低 temperature
-            current_temp = max(0.1, temperature * (0.7 ** (attempt - 1)))
-            # JSON Mode 僅首次嘗試，且改用更安全的 prompt 內嵌方式
-            try_json = use_json_mode and attempt == 1
-
-            try:
-                def _sync_call() -> str:
-                    kwargs: dict = {
-                        "model": DAILY_AI_MODEL,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "temperature": current_temp,
-                        "max_tokens": max_tokens,
-                    }
-                    if try_json:
-                        kwargs["response_format"] = {"type": "json_object"}
-                        print(f"[DailyMessage] 嘗試 JSON Mode (temp={current_temp:.2f})")
-                    else:
-                        print(f"[DailyMessage] 文字模式 (temp={current_temp:.2f})")
-
-                    response = self._ai_client.chat.completions.create(**kwargs)
-                    content = response.choices[0].message.content or ""
-                    finish = response.choices[0].finish_reason
-                    usage = getattr(response, "usage", None)
-                    usage_str = f"prompt={usage.prompt_tokens} completion={usage.completion_tokens}" if usage else "N/A"
-
-                    if not content:
-                        print(f"[DailyMessage] API 回傳空內容！finish_reason={finish} usage=({usage_str})")
-
-                    return content
-
-                text = await asyncio.to_thread(_sync_call)
-                if not text:
-                    # 空內容：若為 JSON Mode 則直接視為該模式不支援，下次不再嘗試
-                    print(f"[DailyMessage] 第 {attempt}/{max_retries} 次嘗試回傳空內容")
-                    if try_json:
-                        print(f"[DailyMessage] JSON Mode 回傳空內容，後續嘗試將跳過 JSON Mode")
-                        use_json_mode = False
-                    continue
-
-                parsed = self._parse_ai_response(text)
-                if parsed is not None:
-                    return parsed
-
-                print(f"[DailyMessage] 第 {attempt}/{max_retries} 次嘗試失敗（解析錯誤）")
-
-            except Exception as e:
-                print(f"[DailyMessage] 第 {attempt}/{max_retries} 次嘗試異常: {type(e).__name__}: {e}")
-
-        print(f"[DailyMessage] DeepSeek API 呼叫失敗（已重試 {max_retries} 次）")
-        return None
-
     async def _generate_section(
         self,
         existing_history: List[Dict[str, Any]],
@@ -396,8 +209,17 @@ class DailyMessageEvent(commands.Cog):
         Returns:
             單篇內容 dict（含 section_quick_learn）或 None
         """
+        if self._ai is None:
+            print("[DailyMessage] DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
+            return None
+
         prompt = self._build_single_section_prompt(existing_history, forbidden_topics)
-        result = await self._call_deepseek(prompt, max_tokens=DAILY_GENERATION_MAX_TOKENS, use_json_mode=False)
+        result = await self._ai.call(
+            prompt,
+            profile_name=DAILY_GENERATION_PROFILE,
+            max_tokens=DAILY_GENERATION_MAX_TOKENS,
+            use_json_mode=False,
+        )
 
         if result is None:
             print("[DailyMessage] 單篇生成失敗（API/解析錯誤）")
@@ -422,15 +244,24 @@ class DailyMessageEvent(commands.Cog):
         print(f"[DailyMessage] 單篇生成成功 ({merged['section_type']})")
         return merged
 
-    async def _verify_section(self, content: Dict[str, Any]) -> Optional[Dict[str, str]]:
-        """### 二次驗證單篇文章正確性
+    async def _verify_with_profile(
+        self,
+        content: Dict[str, Any],
+        profile_name: str,
+    ) -> Optional[Dict[str, str]]:
+        """### 以指定配置驗證單篇文章
 
         Args:
             content: 已生成的單篇內容 dict
+            profile_name: AI_PROFILES 中的配置名稱
 
         Returns:
-            驗證結果 dict（verification / credibility / evidence）或 None
+            驗證結果 dict（verification / credibility / evidence）或 None（API/解析失敗）
         """
+        if self._ai is None:
+            print("[DailyMessage] DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
+            return None
+
         prompt = self._build_single_verification_prompt(
             content["section_type"],
             content["section_title"],
@@ -438,31 +269,73 @@ class DailyMessageEvent(commands.Cog):
             content["section_detail"],
             content["section_sources"],
         )
-        v = await self._call_deepseek(prompt, max_tokens=DAILY_VERIFICATION_MAX_TOKENS, use_json_mode=False)
+        v = await self._ai.call(
+            prompt,
+            profile_name=profile_name,
+            max_tokens=DAILY_VERIFICATION_MAX_TOKENS,
+            use_json_mode=False,
+        )
 
         if v is None:
-            print("[DailyMessage] 單篇驗證失敗（API/解析錯誤）")
+            print(f"[DailyMessage] 驗證失敗（API/解析錯誤，配置={profile_name}）")
             return None
 
         v_required = ["verification", "credibility", "evidence"]
         for key in v_required:
             if key not in v or not v[key]:
-                print(f"[DailyMessage] 驗證缺少必要欄位: {key}")
+                print(f"[DailyMessage] 驗證缺少必要欄位: {key}（配置={profile_name}）")
                 return None
 
-        print(f"[DailyMessage] 驗證完成: {v['verification']}(可信度{v['credibility']})")
+        print(f"[DailyMessage] 驗證完成（配置={profile_name}）: {v['verification']}(可信度{v['credibility']})")
         return v
+
+    async def _verify_section(self, content: Dict[str, Any]) -> Tuple[Optional[Dict[str, str]], str]:
+        """### 兩段式驗證單篇文章（依 DAILY_VERIFICATION_PROFILES 依序嘗試、命中即短路）
+
+        規則：
+        - 依序嘗試每個驗證配置；任一配置判定「通過/有疑慮」即接受並返回 (結果, "accepted")，
+          不再嘗試後續配置（不是每篇都跑兩次驗證）。
+        - 僅當前一配置判定「不通過」時，才嘗試下一個配置。
+        - 所有配置皆判定「不通過」→ (None, "rejected")（宣告文章失敗，觸發重新生成）。
+        - 所有配置皆 API 失敗（重試耗盡）→ (None, "error")（重試驗證或降級）。
+
+        Args:
+            content: 已生成的單篇內容 dict
+
+        Returns:
+            (驗證結果 dict, 狀態)；狀態 ∈ {"accepted", "rejected", "error"}
+        """
+        last_profile = DAILY_VERIFICATION_PROFILES[-1]
+
+        for profile_name in DAILY_VERIFICATION_PROFILES:
+            v = await self._verify_with_profile(content, profile_name)
+            if v is None:
+                # 該配置 API 失敗：僅最後一個配置失敗時宣告 error，否則換下一個配置
+                if profile_name == last_profile:
+                    return None, "error"
+                continue
+
+            if v["verification"] != "不通過":
+                # 通過 / 有疑慮：直接接受，短路（不再呼叫後續配置）
+                return v, "accepted"
+
+            # 判定「不通過」→ 嘗試下一個配置
+            print(f"[DailyMessage] 配置「{profile_name}」判定不通過，嘗試下一個配置")
+
+        # 所有配置皆判定「不通過」：宣告文章失敗
+        return None, "rejected"
 
     async def _generate_and_verify_article(
         self,
         existing_history: List[Dict[str, Any]],
         forbidden_topics: str = "",
     ) -> Optional[Dict[str, str]]:
-        """### 生成 + 驗證單篇文章（獨立重試循環）
+        """### 生成 + 兩段式驗證單篇文章（獨立重試循環）
 
-        生成失敗重試（DAILY_AI_MAX_RETRIES）；驗證失敗重試（DAILY_VERIFY_MAX_RETRIES）；
-        驗證判定「不通過」則回到生成階段重新生成。
-        驗證全部重試失敗時，降級返回未驗證版本（沿用既有行為）。
+        生成失敗重試（DAILY_AI_MAX_RETRIES）。
+        驗證依 DAILY_VERIFICATION_PROFILES 依序嘗試：配置1 通過即接受（短路），
+        不通過才試配置2；全部不通過（rejected）宣告文章失敗並回到生成階段重新生成；
+        全部 API 失敗（error）重試驗證，耗盡則降級返回未驗證版本。
 
         Args:
             existing_history: 歷史內容清單（不含當日）
@@ -482,30 +355,36 @@ class DailyMessageEvent(commands.Cog):
                     await asyncio.sleep(DAILY_AI_RETRY_BASE_DELAY * (2 ** (gen_attempt - 1)))
                 continue
 
-            # 驗證（獨立重試：API 失敗僅重試驗證，不重新生成）
+            rejected = False
             for ver_attempt in range(1, ver_max + 1):
-                verification = await self._verify_section(generated)
-                if verification is None:
-                    print(f"[DailyMessage] 驗證嘗試 {ver_attempt}/{ver_max} 失敗（API/解析錯誤），重試驗證")
-                    if ver_attempt < ver_max:
-                        await asyncio.sleep(DAILY_VERIFY_RETRY_BASE_DELAY * (2 ** (ver_attempt - 1)))
-                    continue
+                verification, status = await self._verify_section(generated)
 
-                # 驗證成功，檢查內容是否不合格
-                if verification["verification"] == "不通過":
-                    print("[DailyMessage] 驗證判定內容不合格，回到生成階段")
+                if status == "accepted":
+                    # 驗證通過（通過/有疑慮均可接受）
+                    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                    return {
+                        **generated,
+                        "section_credibility": verification["credibility"],
+                        "verified_at": now_str,
+                        "verification_notes": f"{verification['verification']}(可信度{verification['credibility']})",
+                    }
+
+                if status == "rejected":
+                    # 兩段式皆判定不通過：宣告文章失敗，回到生成階段重新生成
+                    print(f"[DailyMessage] 兩段式驗證皆判定不通過（第 {gen_attempt}/{gen_max} 次生成），回到生成階段")
+                    rejected = True
                     break  # 跳出驗證循環，回到生成循環
 
-                # 驗證通過（通過/有疑慮均可接受）
-                now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-                return {
-                    **generated,
-                    "section_credibility": verification["credibility"],
-                    "verified_at": now_str,
-                    "verification_notes": f"{verification['verification']}(可信度{verification['credibility']})",
-                }
+                # status == "error"：全部配置 API 失敗，重試驗證（不重新生成）
+                print(f"[DailyMessage] 驗證嘗試 {ver_attempt}/{ver_max} 失敗（API/解析錯誤），重試驗證")
+                if ver_attempt < ver_max:
+                    await asyncio.sleep(DAILY_VERIFY_RETRY_BASE_DELAY * (2 ** (ver_attempt - 1)))
 
-            # 驗證全部重試失敗（verification 仍為 None）：降級使用未驗證內容
+            # rejected → 回到生成循環（重新生成）；error 且重試耗盡 → 降級未驗證
+            if rejected:
+                continue
+
+            # 驗證全部重試失敗（error）：降級使用未驗證內容
             print("[DailyMessage] 驗證階段全部失敗，使用未驗證內容")
             now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
             return {

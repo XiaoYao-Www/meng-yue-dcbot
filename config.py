@@ -73,10 +73,44 @@ DAILY_VERIFY_MAX_RETRIES: int = 3           # 驗證階段 API 呼叫失敗時�
 DAILY_VERIFY_RETRY_BASE_DELAY: float = 1.5  # 驗證階段重試基礎等待秒數
 
 
-# ── 每日學習 AI 模型與端點 ──
+# ── AI 配置池（所有 AI 用途的配置皆集中於此） ──
+# 每個配置包含：
+#   model:            模型名稱（如 deepseek-v4-pro）
+#   base_url:         獨立 API 端點
+#   thinking_enabled: 思考模式開關（True=啟用，False=禁用）
+#   reasoning_effort: 思考強度（low / high / max，僅思考啟用時使用）
+# 使用方式：其他功能（如每日任務）以配置名稱引用，例：DAILY_GENERATION_PROFILE = "deepseek_pro"
 
-DAILY_AI_MODEL: str = os.getenv("DAILY_AI_MODEL", "deepseek-v4-pro")             # AI 模型名稱
-DAILY_AI_BASE_URL: str = os.getenv("DAILY_AI_BASE_URL", "https://api.deepseek.com")  # API 端點
+AI_PROFILES: dict[str, dict] = {
+    "deepseek_pro": {
+        "model": "deepseek-v4-pro",
+        "base_url": "https://api.deepseek.com",
+        "thinking_enabled": True,
+        "reasoning_effort": "high",
+    },
+    "deepseek_flash": {
+        "model": "deepseek-v4-flash",
+        "base_url": "https://api.deepseek.com",
+        "thinking_enabled": False,
+    },
+}
+
+
+# ── 每日任務使用的 AI 配置（引用 AI_PROFILES 中的配置名稱） ──
+
+DAILY_GENERATION_PROFILE: str = "deepseek_pro"    # 生成階段使用的配置
+
+# 驗證階段使用的配置（有序，依序嘗試；前一配置判定「通過/有疑慮」即接受並短路，
+# 僅「不通過」才嘗試下一個配置；全部不通過才宣告文章失敗）
+DAILY_VERIFICATION_PROFILES: tuple[str, ...] = ("deepseek_flash", "deepseek_pro")
+
+# 驗證配置名稱存在（缺失即拋錯，避免執行期才發現）
+for _profile_name in (DAILY_GENERATION_PROFILE, *DAILY_VERIFICATION_PROFILES):
+    if _profile_name not in AI_PROFILES:
+        raise RuntimeError(
+            f"錯誤：AI 配置「{_profile_name}」不存在於 AI_PROFILES，"
+            f"可用配置：{'、'.join(AI_PROFILES.keys())}"
+        )
 
 
 # ── 每日學習 AI Token 參數 ──
@@ -202,7 +236,8 @@ summary 與 quick_learn 欄位的格式限制（與 detail 不同，非常重要
 5. 嚴禁重複主題：完全重複（主題、人物、理論、實驗、疾病、哲學家、神話、學派）、概念重疊（同義詞，如「巴納姆效應」與「佛瑞效應」、「DSM-5」與「DSM-5-TR」）、關聯過高（已寫過「尼采」不得再專講「權力意志」）均視為重複。若無法確認是否重複，請直接改選其他截然不同的主題。
 
 【引用來源與格式要求】
-每篇文章至少三項來源。其中「至少包含一篇原始文獻或原典」，不可全為教科書。
+來源必須真實存在。
+若無法確認完整書目信息，不得補全，可以只提供已確認存在的來源。
 優先引用來源：
 - 心理/社會/醫學：原始研究、APA、DSM-5-TR、ICD-11、大學教材、學術出版社。
 - 哲學：原典、哲學史、Stanford Encyclopedia of Philosophy。
