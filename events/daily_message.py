@@ -63,16 +63,17 @@ def build_daily_embed(contents: List[Dict[str, Any]]) -> Embed:
         color=Color.blue(),
     )
 
-    for content in contents:
-        field = f"**{content['section_title']}**\n"
+    for index, content in enumerate(contents, start=1):
+        field = f"**{content['section_title']}**\n"  # 標題旁加上編號
         field += f"{_strip_embed_unsafe_markdown(content['section_summary'])}\n"
         if content.get("section_quick_learn"):
-            field += f"快速學習：{_strip_embed_unsafe_markdown(content['section_quick_learn'])}\n"
+            field += f"📖 快速學習：{_strip_embed_unsafe_markdown(content['section_quick_learn'])}\n"
         field += f"可信度：{content['section_credibility']}"
         if content.get("verified_at"):
-            field += f"\n驗證時間：{content['verified_at']}"
+            field += f"\n🔍 驗證時間：{content['verified_at']}"
+        
         embed.add_field(
-            name=f"# {content['section_type']}",
+            name=f"{"1️⃣" if (index == 0) else "2️⃣"} {content['section_type']}",
             value=field,
             inline=False,
         )
