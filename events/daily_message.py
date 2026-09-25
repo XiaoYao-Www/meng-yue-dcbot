@@ -223,7 +223,7 @@ class DailyMessageEvent(commands.Cog):
             prompt,
             profile_name=DAILY_GENERATION_PROFILE,
             max_tokens=DAILY_GENERATION_MAX_TOKENS,
-            use_json_mode=False,
+            use_json_mode=True,
             on_quota_exceeded="postpone",
         )
 
@@ -279,7 +279,7 @@ class DailyMessageEvent(commands.Cog):
             prompt,
             profile_name=profile_name,
             max_tokens=DAILY_VERIFICATION_MAX_TOKENS,
-            use_json_mode=False,
+            use_json_mode=True,
             on_quota_exceeded="postpone",
         )
 
@@ -293,7 +293,7 @@ class DailyMessageEvent(commands.Cog):
                 print(f"[DailyMessage] 驗證缺少必要欄位: {key}（配置={profile_name}）")
                 return None
 
-        print(f"[DailyMessage] 驗證完成（配置={profile_name}）: {v['verification']}(可信度{v['credibility']})")
+        print(f"[DailyMessage] 驗證完成（配置={profile_name}）: {v['verification']} - {v['credibility']}")
         return v
 
     async def _verify_section(self, content: Dict[str, Any]) -> Tuple[Optional[Dict[str, str]], str]:
@@ -369,11 +369,18 @@ class DailyMessageEvent(commands.Cog):
                 if status == "accepted":
                     # 驗證通過（通過/有疑慮均可接受）
                     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                    credibility_desc = verification["credibility"]
+                    evidence_desc = verification.get("evidence", "")
+                    ver_notes = (
+                        f"**審查結論：** {verification['verification']}\n"
+                        f"**評價與依據：** {credibility_desc}\n\n"
+                        f"**詳細核實說明：**\n{evidence_desc}"
+                    )
                     return {
                         **generated,
-                        "section_credibility": verification["credibility"],
+                        "section_credibility": credibility_desc,
                         "verified_at": now_str,
-                        "verification_notes": f"{verification['verification']}(可信度{verification['credibility']})",
+                        "verification_notes": ver_notes,
                     }
 
                 if status == "rejected":

@@ -189,8 +189,8 @@ def build_article_md(
                     lines.append(src)
         lines.append("")
 
-    # ── 可信度評級 ──
-    lines.append(f"**可信度評級：** {sec_credibility}")
+    # ── 可信度評級與依據 ──
+    lines.append(f"**可信度評級與依據：** {sec_credibility}")
     lines.append("")
 
     # ── 驗證資訊 ──
