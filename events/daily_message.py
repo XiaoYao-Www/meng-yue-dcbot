@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
 from discord import Embed, Color
@@ -18,6 +19,11 @@ from config import (
 from database.daily_content_db import dailyContentDB
 from utils.ai_client import NewApiClient, AIQuotaExceededError, AIQuotaPostponedError
 from utils.article_exporter import save_article_md
+from utils.word_db import (
+    pick_daily_word,
+    build_word_embed,
+    build_word_detail_content,
+)
 
 
 NUM_EMOJIS: list[str] = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
@@ -481,7 +487,9 @@ class DailyMessageEvent(commands.Cog):
         try:
             today_articles = await dailyContentDB.get_daily_contents(date_str)
             if len(today_articles) >= DAILY_ARTICLES_PER_DAY:
-                print(f"[DailyMessage] 今日 ({date_str}) 已有 {len(today_articles)} 篇已發送文章，跳過發送")
+                print(f"[DailyMessage] 今日 ({date_str}) 已有 {len(today_articles)} 篇已發送文章，跳過知識發送")
+                # 檢查今日單字是否已發送，未發送則補發
+                await self._send_daily_word(date_str)
                 # 仍發起背景庫存檢查
                 self.bot.loop.create_task(self.replenish_stock())
                 return
@@ -513,11 +521,71 @@ class DailyMessageEvent(commands.Cog):
             # 發送當日文章至 Discord
             await self._send_daily(date_str, [dict(row) for row in today_articles])
 
+            # 發送每日單字
+            await self._send_daily_word(date_str)
+
             # 發送成功後，背景發起庫存補充
             self.bot.loop.create_task(self.replenish_stock())
 
         except Exception as e:
             print(f"[DailyMessage] 每日訊息任務錯誤: {e}")
+
+    async def _send_daily_word(self, date_str: str) -> None:
+        """### 發送每日單字：Embed（簡明卡片）＋ 討論串（詳細筆記）
+
+        挑選高頻常用單字，直接由本機詞庫讀取，不調用 AI。
+        """
+        if not DAILY_CHANNEL:
+            print("[DailyWord] DAILY_CHANNEL 未設定，無法發送")
+            return
+
+        channel = self.bot.get_channel(DAILY_CHANNEL)
+        if channel is None:
+            print(f"[DailyWord] 無法取得頻道 ID {DAILY_CHANNEL}")
+            return
+
+        # 1. 檢查今日是否已發布每日單字
+        existing = await dailyContentDB.get_daily_word(date_str)
+        if existing:
+            print(f"[DailyWord] 今日 ({date_str}) 已發布每日單字 [{existing['word']}]，跳過發送")
+            return
+
+        # 2. 取得所有歷史已發布單字進行去重，並挑選今日高頻單字
+        published_words = await dailyContentDB.get_all_published_words()
+        word_data = pick_daily_word(exclude_words=published_words, date_str=date_str)
+        if not word_data:
+            print("[DailyWord] 無法從高頻詞庫選取可用單字")
+            return
+
+        word = word_data["word"]
+        hour_str = f"{DAILY_MESSAGE_TIME.hour:02d}:{DAILY_MESSAGE_TIME.minute:02d}"
+
+        # 3. 發送簡明 Embed 至頻道
+        embed = build_word_embed(word_data, daily_time_str=hour_str)
+        message = await channel.send(embed=embed)
+        print(f"[DailyWord] 已發送每日單字 [{word}] 到頻道 {DAILY_CHANNEL}")
+
+        # 4. 建立討論串並張貼詳細資料
+        try:
+            thread = await message.create_thread(
+                name=f"單字筆記 — {word}",
+                auto_archive_duration=1440,
+            )
+            detail_text = build_word_detail_content(word_data)
+            for part in self._split_long_text(detail_text):
+                await thread.send(part)
+            print(f"[DailyWord] 已建立單字討論串並張貼詳細資料")
+        except Exception as e:
+            print(f"[DailyWord] 建立單字討論串失敗: {e}")
+
+        # 5. 持久化至資料庫
+        now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        await dailyContentDB.set_daily_word(
+            date=date_str,
+            word=word,
+            data_json=json.dumps(word_data, ensure_ascii=False),
+            published_at=now_str,
+        )
 
     async def _send_daily(self, date_str: str, articles: List[Dict[str, Any]]) -> None:
         """### 發送當日文章：Markdown 匯出 ＋ Embed（頻道）＋ 討論串（詳細資料）

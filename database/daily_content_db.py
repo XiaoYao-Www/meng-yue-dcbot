@@ -125,6 +125,20 @@ class DailyContentDatabase:
             await self.db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_daily_content_status ON daily_content(status)"
             )
+
+            # 建立每日單字表
+            await self.db.execute("""
+                CREATE TABLE IF NOT EXISTS daily_words (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date          TEXT NOT NULL UNIQUE,
+                    word          TEXT NOT NULL,
+                    data_json     TEXT NOT NULL,
+                    published_at  TEXT NOT NULL
+                )
+            """)
+            await self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_daily_words_date ON daily_words(date)"
+            )
             await self.db.commit()
 
             # 檢查並動態補充 status 欄位（針對已存在的單篇 schema 舊資料庫）
@@ -325,6 +339,47 @@ class DailyContentDatabase:
         except Exception as e:
             print(f"[DailyContentDB Error] 查詢全部失敗: {e}")
             return []
+
+    ##### 每日單字功能 #####
+
+    async def get_daily_word(self, date: str) -> Optional[dict]:
+        """### 查詢指定日期的每日單字"""
+        await self._ensure_connection()
+        try:
+            async with self.db.execute(
+                "SELECT * FROM daily_words WHERE date = ?", (date,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            print(f"[DailyContentDB Error] 查詢每日單字失敗: {e}")
+            return None
+
+    async def set_daily_word(self, date: str, word: str, data_json: str, published_at: str) -> None:
+        """### 儲存當日每日單字"""
+        await self._ensure_connection()
+        async with self._lock:
+            await self.db.execute(
+                """
+                INSERT OR REPLACE INTO daily_words (date, word, data_json, published_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (date, word, data_json, published_at),
+            )
+            await self.db.commit()
+
+    async def get_all_published_words(self) -> set[str]:
+        """### 取得所有已發布過的單字集合（用於去重）"""
+        await self._ensure_connection()
+        try:
+            async with self.db.execute(
+                "SELECT word FROM daily_words"
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return {row["word"].lower() for row in rows}
+        except Exception as e:
+            print(f"[DailyContentDB Error] 查詢已發布單字失敗: {e}")
+            return set()
 
 
 dailyContentDB = DailyContentDatabase(DB_PATH)
