@@ -62,9 +62,11 @@ ROLE_CHECK_SINGLE_ENABLED: bool = True       # 啟用即時單人檢查
 MAX_USER_ITEMS_PER_TAG: int = 50             # 單一標籤下項目數量上限
 
 
-# ── 每日文章數量 ──
+# ── 每日文章與庫存配置 ──
 
-DAILY_ARTICLES_PER_DAY: int = 1    # 每天生成的知識文章篇數
+DAILY_ARTICLES_PER_DAY: int = 1    # 每天消耗/發送的知識文章篇數
+STOCK_MIN_LIMIT: int = 3           # 庫存下限（低於此數量時觸發自動補充）
+STOCK_MAX_LIMIT: int = 10          # 庫存上限（自動補充至此數量）
 
 
 # ── 每日學習 AI 重試 ──

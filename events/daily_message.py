@@ -13,7 +13,7 @@ from config import (
     DAILY_VERIFY_MAX_RETRIES, DAILY_VERIFY_RETRY_BASE_DELAY,
     DAILY_SINGLE_SECTION_GENERATION_PROMPT_TEMPLATE,
     DAILY_SINGLE_SECTION_VERIFICATION_PROMPT_TEMPLATE,
-    DAILY_ARTICLES_PER_DAY,
+    DAILY_ARTICLES_PER_DAY, STOCK_MIN_LIMIT, STOCK_MAX_LIMIT,
 )
 from database.daily_content_db import dailyContentDB
 from utils.ai_client import NewApiClient
@@ -401,42 +401,35 @@ class DailyMessageEvent(commands.Cog):
 
         return None
 
-    @tasks.loop(time=DAILY_MESSAGE_TIME)
-    async def daily_message_task(self):
-        """### 每日訊息任務
+    async def replenish_stock(self) -> int:
+        """### 背景檢查並補充庫存至 STOCK_MAX_LIMIT
 
-        檢查當日已入庫篇數 → 未達 DAILY_ARTICLES_PER_DAY 則逐篇「生成→驗證→入庫」，
-        並將當日已生成主題注入為禁止主題（避免同天主題類似）→ 齊全後發送 Embed + 討論串。
-        重啟／補跑時自動只補缺的篇數。
+        當庫存小於 STOCK_MIN_LIMIT 時觸發，計算缺口 (STOCK_MAX_LIMIT - 現有庫存)，
+        逐篇執行生成 + 兩段式驗證，並存入庫存庫 (status='stock')。
+        去重提示詞包含資料庫中所有已發送與庫存文章標題。
         """
-        now = datetime.now(TZ)
-        date_str = now.strftime("%Y-%m-%d")
-        print(f"--- 每日訊息任務開始 ({date_str}) ---")
-
         try:
-            # 1. 檢查當日已入庫篇數
-            today_articles = await dailyContentDB.get_daily_contents(date_str)
-            if len(today_articles) >= DAILY_ARTICLES_PER_DAY:
-                print(f"[DailyMessage] 今日 ({date_str}) 已有 {len(today_articles)} 篇，跳過生成")
-                return
+            current_stock = await dailyContentDB.get_stock_count()
+            if current_stock >= STOCK_MIN_LIMIT:
+                print(f"[DailyMessage] 目前庫存 {current_stock} 篇（≥ 下限 {STOCK_MIN_LIMIT} 篇），無需補充")
+                return 0
 
-            # 2. 歷史內容（不含當日），供避免重複
-            all_contents = await dailyContentDB.get_all_contents()
-            history = [dict(row) for row in all_contents if row["date"] != date_str]
+            needed = STOCK_MAX_LIMIT - current_stock
+            print(f"[DailyMessage] 目前庫存 {current_stock} 篇（< 下限 {STOCK_MIN_LIMIT} 篇），開始補充 {needed} 篇至上限 {STOCK_MAX_LIMIT} 篇...")
 
-            # 3. 逐篇生成：注入當日已生成主題為禁止主題
-            for i in range(len(today_articles), DAILY_ARTICLES_PER_DAY):
-                forbidden_topics = "\n".join(
-                    f'- [{a["section_type"]}]「{a["section_title"]}」' for a in today_articles
-                )
-                article = await self._generate_and_verify_article(history, forbidden_topics)
+            added = 0
+            for i in range(needed):
+                # 取得全部歷史 + 庫存內容，進行 Prompt 全量去重
+                all_contents = await dailyContentDB.get_all_contents()
+                history = [dict(row) for row in all_contents]
+
+                article = await self._generate_and_verify_article(history, forbidden_topics="")
                 if article is None:
-                    print(f"[DailyMessage] 第 {i + 1} 篇生成失敗（重試耗盡），停止今日生成")
+                    print(f"[DailyMessage] 庫存補充第 {i + 1}/{needed} 篇生成失敗（重試耗盡），中斷補充")
                     break
 
                 now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-                await dailyContentDB.set_daily_content(
-                    date=date_str,
+                await dailyContentDB.add_stock_content(
                     section_type=article["section_type"],
                     section_title=article["section_title"],
                     section_summary=article["section_summary"],
@@ -448,17 +441,65 @@ class DailyMessageEvent(commands.Cog):
                     verified_at=article["verified_at"],
                     verification_notes=article["verification_notes"],
                 )
-                print(f"[DailyMessage] 已儲存第 {i + 1} 篇：{article['section_title']}")
+                added += 1
+                print(f"[DailyMessage] 已成功加入庫存 ({i + 1}/{needed})：{article['section_title']}")
 
-                # 重新讀取當日文章，供下一輪注入禁止主題
-                today_articles = await dailyContentDB.get_daily_contents(date_str)
+            print(f"[DailyMessage] 庫存補充完成，成功新增 {added} 篇，現有庫存 {await dailyContentDB.get_stock_count()} 篇")
+            return added
+        except Exception as e:
+            print(f"[DailyMessage] 庫存補充處理異常: {e}")
+            return 0
 
-            # 4. 發送當日全部文章
+    @tasks.loop(time=DAILY_MESSAGE_TIME)
+    async def daily_message_task(self):
+        """### 每日訊息任務（庫存消耗模式）
+
+        1. 檢查當日已發送篇數 → 若未達 DAILY_ARTICLES_PER_DAY 則從庫存庫取出文章劃歸當日。
+        2. 若庫存不足所需篇數，先同步執行庫存補充。
+        3. 劃歸為當日文章後，匯出 Markdown 檔並發送 Embed 訊息與討論串。
+        4. 發送成功後，發起非阻塞背景任務補充庫存至上限。
+        """
+        now = datetime.now(TZ)
+        date_str = now.strftime("%Y-%m-%d")
+        print(f"--- 每日訊息任務開始 ({date_str}) ---")
+
+        try:
+            today_articles = await dailyContentDB.get_daily_contents(date_str)
+            if len(today_articles) >= DAILY_ARTICLES_PER_DAY:
+                print(f"[DailyMessage] 今日 ({date_str}) 已有 {len(today_articles)} 篇已發送文章，跳過發送")
+                # 仍發起背景庫存檢查
+                self.bot.loop.create_task(self.replenish_stock())
+                return
+
+            needed_count = DAILY_ARTICLES_PER_DAY - len(today_articles)
+
+            # 檢查庫存數量，若不足則同步補充
+            stock_count = await dailyContentDB.get_stock_count()
+            if stock_count < needed_count:
+                print(f"[DailyMessage] 庫存僅有 {stock_count} 篇，不足所需 {needed_count} 篇，先執行同步庫存補充...")
+                await self.replenish_stock()
+
+            # 從庫存取出最舊的 needed_count 篇劃歸為今日
+            stock_items = await dailyContentDB.get_stock_contents(needed_count)
+            if not stock_items:
+                print("[DailyMessage] 庫存為空且補充失敗，今日無法發送每日訊息")
+                return
+
+            for item in stock_items:
+                await dailyContentDB.publish_stock_content(item["id"], date_str)
+                print(f"[DailyMessage] 已將庫存文章 [{item['section_title']}] (ID: {item['id']}) 劃歸為今日 ({date_str}) 發送")
+
+            # 重新取得今日劃歸後的文章
             today_articles = await dailyContentDB.get_daily_contents(date_str)
             if not today_articles:
-                print("[DailyMessage] 今日無任何文章，不發送")
+                print("[DailyMessage] 今日無劃歸文章，不發送")
                 return
+
+            # 發送當日文章至 Discord
             await self._send_daily(date_str, [dict(row) for row in today_articles])
+
+            # 發送成功後，背景發起庫存補充
+            self.bot.loop.create_task(self.replenish_stock())
 
         except Exception as e:
             print(f"[DailyMessage] 每日訊息任務錯誤: {e}")
@@ -541,18 +582,17 @@ class DailyMessageEvent(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def _startup_check(self) -> None:
-        """### 啟動後立即檢查：若今天篇數不足則觸發一次
-
-        解決 tasks.loop(time=...) 在啟動時間已過指定時刻時，
-        要等到隔天才觸發的問題。
-        """
+        """### 啟動後立即檢查：若今天篇數不足則觸發一次發送，並在背景補足庫存"""
         await self.bot.wait_until_ready()
         await asyncio.sleep(1)
         await self.daily_message_task()
+        # 背景補充庫存
+        self.bot.loop.create_task(self.replenish_stock())
 
 
 async def setup(bot: commands.Bot):
     cog = DailyMessageEvent(bot)
     await bot.add_cog(cog)
-    # 啟動後立即檢查今天是否需發送
+    # 啟動後立即檢查今天是否需發送與補充庫存
     bot.loop.create_task(cog._startup_check())
+

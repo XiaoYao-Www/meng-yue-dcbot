@@ -7,7 +7,7 @@ from config import DB_PATH
 
 class DailyContentRow(TypedDict):
     id: int
-    date: str                  # 日期 YYYY-MM-DD（同一天可有多筆）
+    date: str                  # 日期 YYYY-MM-DD（同一天可有多筆；庫存為空字串）
     section_type: str          # 次領域（如「犯罪心理學」）
     section_title: str
     section_summary: str       # 頻道簡述
@@ -18,6 +18,7 @@ class DailyContentRow(TypedDict):
     generated_at: str
     verified_at: str           # 驗證時間
     verification_notes: str    # 驗證備註
+    status: str                # 狀態：'published' (已發送) 或 'stock' (庫存中)
 
 
 class DailyContentDatabase:
@@ -71,7 +72,7 @@ class DailyContentDatabase:
             await self.setup()
 
     async def setup(self) -> None:
-        """初始化表格（含舊 schema 遷移：雙篇一行 → 單篇一行）"""
+        """初始化表格（含舊 schema 遷移與 status 欄位維護）"""
         if self.db is None:
             await self.connect()
 
@@ -100,11 +101,11 @@ class DailyContentDatabase:
                     await self.db.execute("ALTER TABLE daily_content RENAME TO daily_content_old")
                     await self.db.commit()
 
-            # 建立新表：一篇一筆，同一天可有多筆（date 建索引供查詢）
+            # 建立新表：一篇一筆，同一天可有多筆（date 與 status 建索引）
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS daily_content (
                     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date                  TEXT NOT NULL,
+                    date                  TEXT NOT NULL DEFAULT '',
                     section_type          TEXT NOT NULL,
                     section_title         TEXT NOT NULL,
                     section_summary       TEXT NOT NULL,
@@ -114,23 +115,32 @@ class DailyContentDatabase:
                     section_credibility   TEXT NOT NULL DEFAULT '未驗證',
                     generated_at          TEXT NOT NULL,
                     verified_at           TEXT NOT NULL DEFAULT '',
-                    verification_notes    TEXT NOT NULL DEFAULT ''
+                    verification_notes    TEXT NOT NULL DEFAULT '',
+                    status                TEXT NOT NULL DEFAULT 'published'
                 )
             """)
             await self.db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_daily_content_date ON daily_content(date)"
             )
+            await self.db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_daily_content_status ON daily_content(status)"
+            )
             await self.db.commit()
+
+            # 檢查並動態補充 status 欄位（針對已存在的單篇 schema 舊資料庫）
+            col_cursor = await self.db.execute("PRAGMA table_info(daily_content)")
+            columns = [row[1] async for row in col_cursor]
+            if "status" not in columns:
+                print("[DailyContentDB] 補全 status 欄位 (預設 'published')...")
+                await self.db.execute("ALTER TABLE daily_content ADD COLUMN status TEXT NOT NULL DEFAULT 'published'")
+                await self.db.execute("CREATE INDEX IF NOT EXISTS idx_daily_content_status ON daily_content(status)")
+                await self.db.commit()
 
             if needs_legacy_split:
                 await self._migrate_legacy_rows()
 
     async def _migrate_legacy_rows(self) -> None:
         """### 將舊雙篇表 daily_content_legacy 每筆拆成兩行單篇插入新表
-
-        舊表結構：date（PK）+ section1_* 六欄 + section2_* 六欄。
-        新表結構：每筆一篇，同一天多筆，不再區分第一則／第二則。
-        舊資料沒有快速學習欄位，遷移後為空字串（顯示端自動跳過）。
         """
         try:
             async with self.db.execute("SELECT * FROM daily_content_legacy") as cursor:
@@ -156,8 +166,8 @@ class DailyContentDatabase:
                             (date, section_type, section_title, section_summary,
                              section_detail, section_quick_learn, section_sources,
                              section_credibility, generated_at, verified_at,
-                             verification_notes)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             verification_notes, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'published')
                         """,
                         (
                             date,
@@ -197,22 +207,9 @@ class DailyContentDatabase:
         generated_at: str,
         verified_at: str = "",
         verification_notes: str = "",
+        status: str = "published",
     ) -> None:
-        """### 寫入一篇每日內容（每筆一篇文章，同一天可有多筆）
-
-        Args:
-            date: 日期 YYYY-MM-DD
-            section_type: 次領域（如「犯罪心理學」）
-            section_title: 標題
-            section_summary: 簡述（頻道用）
-            section_detail: 詳細資料（討論串用）
-            section_quick_learn: 快速學習（新手速懂區塊）
-            section_sources: 出處引用
-            section_credibility: 可信度評級
-            generated_at: 生成時間
-            verified_at: 驗證時間
-            verification_notes: 驗證備註
-        """
+        """### 寫入一篇每日內容"""
         await self._ensure_connection()
         async with self._lock:
             await self.db.execute(
@@ -221,33 +218,94 @@ class DailyContentDatabase:
                     (date, section_type, section_title, section_summary,
                      section_detail, section_quick_learn, section_sources,
                      section_credibility, generated_at, verified_at,
-                     verification_notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     verification_notes, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     date, section_type, section_title, section_summary,
                     section_detail, section_quick_learn, section_sources,
                     section_credibility, generated_at, verified_at,
-                    verification_notes,
+                    verification_notes, status,
                 ),
+            )
+            await self.db.commit()
+
+    async def add_stock_content(
+        self,
+        section_type: str,
+        section_title: str,
+        section_summary: str,
+        section_detail: str,
+        section_quick_learn: str,
+        section_sources: str,
+        section_credibility: str,
+        generated_at: str,
+        verified_at: str = "",
+        verification_notes: str = "",
+    ) -> None:
+        """### 新增一篇驗證完成的文章至庫存庫 (status='stock')"""
+        await self.set_daily_content(
+            date="",
+            section_type=section_type,
+            section_title=section_title,
+            section_summary=section_summary,
+            section_detail=section_detail,
+            section_quick_learn=section_quick_learn,
+            section_sources=section_sources,
+            section_credibility=section_credibility,
+            generated_at=generated_at,
+            verified_at=verified_at,
+            verification_notes=verification_notes,
+            status="stock",
+        )
+
+    ##### 庫存管理功能 #####
+
+    async def get_stock_count(self) -> int:
+        """### 取得目前庫存中的文章數量"""
+        await self._ensure_connection()
+        try:
+            async with self.db.execute(
+                "SELECT COUNT(*) as cnt FROM daily_content WHERE status = 'stock'"
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row["cnt"] if row else 0
+        except Exception as e:
+            print(f"[DailyContentDB Error] 查詢庫存數量失敗: {e}")
+            return 0
+
+    async def get_stock_contents(self, limit: int) -> List[DailyContentRow]:
+        """### 取得最舊的未發送庫存文章"""
+        await self._ensure_connection()
+        try:
+            async with self.db.execute(
+                "SELECT * FROM daily_content WHERE status = 'stock' ORDER BY id ASC LIMIT ?",
+                (limit,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [cast(DailyContentRow, dict(row)) for row in rows]
+        except Exception as e:
+            print(f"[DailyContentDB Error] 取得庫存內容失敗: {e}")
+            return []
+
+    async def publish_stock_content(self, article_id: int, date_str: str) -> None:
+        """### 將指定庫存文章劃歸為當日已發送 (status='published', date=date_str)"""
+        await self._ensure_connection()
+        async with self._lock:
+            await self.db.execute(
+                "UPDATE daily_content SET date = ?, status = 'published' WHERE id = ?",
+                (date_str, article_id),
             )
             await self.db.commit()
 
     ##### 查詢功能 #####
 
     async def get_daily_contents(self, date: str) -> List[DailyContentRow]:
-        """### 查詢指定日期的所有每日內容（同一天多筆）
-
-        Args:
-            date: 日期 YYYY-MM-DD
-
-        Returns:
-            該日全部文章（依 id 順序），無則空清單
-        """
+        """### 查詢指定日期的已發送每日內容"""
         await self._ensure_connection()
         try:
             async with self.db.execute(
-                "SELECT * FROM daily_content WHERE date = ? ORDER BY id ASC", (date,)
+                "SELECT * FROM daily_content WHERE date = ? AND status = 'published' ORDER BY id ASC", (date,)
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [cast(DailyContentRow, dict(row)) for row in rows]
@@ -256,15 +314,11 @@ class DailyContentDatabase:
             return []
 
     async def get_all_contents(self) -> List[DailyContentRow]:
-        """### 取得所有已儲存的每日內容（供 AI 去重使用）
-
-        Returns:
-            List[DailyContentRow]
-        """
+        """### 取得所有已儲存的內容（含已發送與庫存中，供 AI 提示詞去重使用）"""
         await self._ensure_connection()
         try:
             async with self.db.execute(
-                "SELECT * FROM daily_content ORDER BY date DESC, id ASC"
+                "SELECT * FROM daily_content ORDER BY id DESC"
             ) as cursor:
                 rows = await cursor.fetchall()
                 return [cast(DailyContentRow, dict(row)) for row in rows]
