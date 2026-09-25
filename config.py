@@ -9,7 +9,7 @@ from datetime import time
 DISCORD_TOKEN: str | None = os.getenv("DISCORD_TOKEN")
 GUILD_ID: int = int(os.getenv("GUILD_ID", "0"))
 DB_PATH: str | None = os.getenv("DB_PATH")
-DEEPSEEK_API_KEY: str | None = os.getenv("DEEPSEEK_API_KEY")
+NEW_API_KEY: str | None = os.getenv("NEW_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
 DAILY_CHANNEL: int = int(os.getenv("DAILY_CHANNEL", "0"))
 
 # 環境變數驗證
@@ -18,6 +18,8 @@ if not DISCORD_TOKEN:
     _MISSING.append("DISCORD_TOKEN")
 if not DB_PATH:
     _MISSING.append("DB_PATH")
+if not NEW_API_KEY:
+    _MISSING.append("NEW_API_KEY")
 if _MISSING:
     raise RuntimeError(
         f"❌ 以下環境變數未設定：{'、'.join(_MISSING)}，請檢查 .env 檔案"
@@ -62,7 +64,7 @@ MAX_USER_ITEMS_PER_TAG: int = 50             # 單一標籤下項目數量上限
 
 # ── 每日文章數量 ──
 
-DAILY_ARTICLES_PER_DAY: int = 2    # 每天生成的知識文章篇數
+DAILY_ARTICLES_PER_DAY: int = 1    # 每天生成的知識文章篇數
 
 
 # ── 每日學習 AI 重試 ──
@@ -82,27 +84,26 @@ DAILY_VERIFY_RETRY_BASE_DELAY: float = 1.5  # 驗證階段重試基礎等待秒�
 # 使用方式：其他功能（如每日任務）以配置名稱引用，例：DAILY_GENERATION_PROFILE = "deepseek_pro"
 
 AI_PROFILES: dict[str, dict] = {
-    "deepseek_pro": {
-        "model": "deepseek-v4-pro",
-        "base_url": "https://api.deepseek.com",
-        "thinking_enabled": True,
+    "pro": {
+        "model": "openai/gpt-oss-120b",
+        "base_url": "http://192.168.1.116:14735/v1",
         "reasoning_effort": "high",
     },
-    "deepseek_flash": {
-        "model": "deepseek-v4-flash",
-        "base_url": "https://api.deepseek.com",
-        "thinking_enabled": False,
+    "flash": {
+        "model": "gemini-3.5-flash-lite",
+        "base_url": "http://192.168.1.116:14735/v1",
+        "reasoning_effort": None,
     },
 }
 
 
 # ── 每日任務使用的 AI 配置（引用 AI_PROFILES 中的配置名稱） ──
 
-DAILY_GENERATION_PROFILE: str = "deepseek_pro"    # 生成階段使用的配置
+DAILY_GENERATION_PROFILE: str = "flash"    # 生成階段使用的配置
 
 # 驗證階段使用的配置（有序，依序嘗試；前一配置判定「通過/有疑慮」即接受並短路，
 # 僅「不通過」才嘗試下一個配置；全部不通過才宣告文章失敗）
-DAILY_VERIFICATION_PROFILES: tuple[str, ...] = ("deepseek_flash", "deepseek_pro")
+DAILY_VERIFICATION_PROFILES: tuple[str, ...] = ("flash", "flash")
 
 # 驗證配置名稱存在（缺失即拋錯，避免執行期才發現）
 for _profile_name in (DAILY_GENERATION_PROFILE, *DAILY_VERIFICATION_PROFILES):

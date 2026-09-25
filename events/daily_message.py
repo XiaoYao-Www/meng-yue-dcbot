@@ -6,7 +6,7 @@ from discord import Embed, Color
 from discord.ext import commands, tasks
 
 from config import (
-    TZ, DAILY_CHANNEL, DEEPSEEK_API_KEY, DAILY_MESSAGE_TIME,
+    TZ, DAILY_CHANNEL, NEW_API_KEY, DAILY_MESSAGE_TIME,
     DAILY_AI_MAX_RETRIES, DAILY_AI_RETRY_BASE_DELAY,
     DAILY_GENERATION_PROFILE, DAILY_VERIFICATION_PROFILES,
     DAILY_GENERATION_MAX_TOKENS, DAILY_VERIFICATION_MAX_TOKENS,
@@ -16,8 +16,11 @@ from config import (
     DAILY_ARTICLES_PER_DAY,
 )
 from database.daily_content_db import dailyContentDB
-from utils.ai_client import DeepSeekClient
+from utils.ai_client import NewApiClient
 from utils.article_exporter import save_article_md
+
+
+NUM_EMOJIS: list[str] = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
 
 def _strip_embed_unsafe_markdown(text: str) -> str:
@@ -64,6 +67,7 @@ def build_daily_embed(contents: List[Dict[str, Any]]) -> Embed:
     )
 
     for index, content in enumerate(contents, start=1):
+        emoji_prefix = NUM_EMOJIS[index - 1] if index <= len(NUM_EMOJIS) else f"{index}."
         field = f"**{content['section_title']}**\n"  # 標題旁加上編號
         field += f"{_strip_embed_unsafe_markdown(content['section_summary'])}\n"
         if content.get("section_quick_learn"):
@@ -73,7 +77,7 @@ def build_daily_embed(contents: List[Dict[str, Any]]) -> Embed:
             field += f"\n🔍 驗證時間：{content['verified_at']}"
         
         embed.add_field(
-            name=f"{"1️⃣" if (index == 0) else "2️⃣"} {content['section_type']}",
+            name=f"{emoji_prefix} {content['section_type']}",
             value=field,
             inline=False,
         )
@@ -127,7 +131,7 @@ def build_detail_content(content: Dict[str, Any]) -> str:
 class DailyMessageEvent(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._ai = DeepSeekClient(DEEPSEEK_API_KEY) if DEEPSEEK_API_KEY else None
+        self._ai = NewApiClient(NEW_API_KEY) if NEW_API_KEY else None
         self.daily_message_task.start()
 
     def cog_unload(self):
@@ -211,7 +215,7 @@ class DailyMessageEvent(commands.Cog):
             單篇內容 dict（含 section_quick_learn）或 None
         """
         if self._ai is None:
-            print("[DailyMessage] DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
+            print("[DailyMessage] NEW_API_KEY 未設定，無法呼叫 AI")
             return None
 
         prompt = self._build_single_section_prompt(existing_history, forbidden_topics)
@@ -260,7 +264,7 @@ class DailyMessageEvent(commands.Cog):
             驗證結果 dict（verification / credibility / evidence）或 None（API/解析失敗）
         """
         if self._ai is None:
-            print("[DailyMessage] DEEPSEEK_API_KEY 未設定，無法呼叫 AI")
+            print("[DailyMessage] NEW_API_KEY 未設定，無法呼叫 AI")
             return None
 
         prompt = self._build_single_verification_prompt(

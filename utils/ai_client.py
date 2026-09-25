@@ -1,10 +1,10 @@
 """
 ### AI 客戶端模組
 
-封裝 DeepSeek（OpenAI 相容）API 呼叫，供各功能（如每日知識生成）重複使用。
+封裝 New-API（OpenAI 相容）API 呼叫，供各功能（如每日知識生成）重複使用。
 
 - AI_PROFILES 配置池（config.py）定義各 profile 的 model / base_url / 思考模式。
-- DeepSeekClient 依 profile 呼叫，含自動重試、漸進式降級與多層 JSON 容錯解析。
+- NewApiClient 依 profile 呼叫，含自動重試、漸進式降級與多層 JSON 容錯解析。
 """
 import asyncio
 import json
@@ -18,45 +18,28 @@ from config import AI_PROFILES, DAILY_AI_MAX_RETRIES
 
 def build_request_kwargs(
     model: str,
-    thinking_enabled: bool,
-    reasoning_effort: str,
+    reasoning_effort: str | None,
     messages: list,
     max_tokens: int,
     use_json_mode: bool,
     temperature: float,
 ) -> dict:
-    """### 依配置構建 DeepSeek Chat Completion 請求參數
+    """建立 New API OpenAI 相容 Chat Completions 請求參數。"""
 
-    依 DeepSeek 思考模式文檔：
-    - 思考啟用：傳 reasoning_effort + extra_body={"thinking": {"type": "enabled"}}，
-      且思考模式不支援 temperature（傳入不會報錯但不生效，故不傳）。
-    - 思考禁用：extra_body={"thinking": {"type": "disabled"}} + 既有 temperature 控制。
-
-    Args:
-        model: 模型名稱
-        thinking_enabled: 思考模式是否啟用
-        reasoning_effort: 思考強度（low / high / max）
-        messages: 對話訊息
-        max_tokens: 最大 token 數
-        use_json_mode: 是否使用 JSON Mode
-        temperature: 溫度（僅思考禁用時使用）
-
-    Returns:
-        可直接傳給 client.chat.completions.create 的 kwargs
-    """
     kwargs: dict = {
         "model": model,
         "messages": messages,
         "max_tokens": max_tokens,
     }
-    if thinking_enabled:
+
+    if reasoning_effort:
         kwargs["reasoning_effort"] = reasoning_effort
-        kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
     else:
         kwargs["temperature"] = temperature
-        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
     if use_json_mode:
         kwargs["response_format"] = {"type": "json_object"}
+
     return kwargs
 
 
@@ -162,8 +145,8 @@ def parse_ai_response(response_text: str) -> Optional[Dict[str, str]]:
     return None
 
 
-class DeepSeekClient:
-    """### DeepSeek（OpenAI 相容）API 客戶端
+class NewApiClient:
+    """### New-API（OpenAI 相容）API 客戶端
 
     依 AI_PROFILES 配置呼叫，並按 base_url 快取底層 client。
     呼叫含自動重試 + 漸進式降級（重試降低 temperature、JSON Mode 僅首次嘗試）。
@@ -173,7 +156,7 @@ class DeepSeekClient:
         """### 初始化
 
         Args:
-            api_key: DeepSeek API Key
+            api_key: New-API Key
         """
         self._api_key = api_key
         self._clients: dict[str, openai.OpenAI] = {}  # base_url → client 快取
@@ -190,7 +173,11 @@ class DeepSeekClient:
         if not self._api_key:
             return None
         if base_url not in self._clients:
-            self._clients[base_url] = openai.OpenAI(api_key=self._api_key, base_url=base_url)
+            self._clients[base_url] = openai.OpenAI(
+                api_key=self._api_key,
+                base_url=base_url,
+                timeout=60.0,
+            )
         return self._clients[base_url]
 
     async def call(
@@ -205,7 +192,7 @@ class DeepSeekClient:
 
         策略：
         1. 依 AI_PROFILES 配置決定 model / base_url / 思考模式與強度
-        2. 優先嘗試 JSON Mode（response_format），若返回空 content 立即回退一般模式
+        2. 優先嘗試 JSON Mode（response_format），若返回空 content 頁面立即回退一般模式
         3. 思考禁用時每次重試降低 temperature，提高輸出確定性
 
         Args:
@@ -229,9 +216,7 @@ class DeepSeekClient:
             return None
 
         model = profile["model"]
-        thinking_enabled = profile["thinking_enabled"]
-        # reasoning_effort 僅思考啟用時需要；禁用時可缺省（DeepSeek 思考禁用不傳 effort）
-        reasoning_effort = profile.get("reasoning_effort", "high")
+        reasoning_effort = profile.get("reasoning_effort")
         max_retries = DAILY_AI_MAX_RETRIES
 
         for attempt in range(1, max_retries + 1):
@@ -244,15 +229,17 @@ class DeepSeekClient:
                 def _sync_call() -> str:
                     kwargs = build_request_kwargs(
                         model=model,
-                        thinking_enabled=thinking_enabled,
                         reasoning_effort=reasoning_effort,
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=max_tokens,
                         use_json_mode=try_json,
                         temperature=current_temp,
                     )
-                    if thinking_enabled:
-                        print(f"[AIClient] {profile_name} 思考模式 model={model} effort={reasoning_effort}")
+                    if reasoning_effort:
+                        print(
+                            f"[AIClient] {profile_name} "
+                            f"model={model} reasoning_effort={reasoning_effort}"
+                        )
                     elif try_json:
                         print(f"[AIClient] {profile_name} JSON 模式 model={model} temp={current_temp:.2f}")
                     else:
@@ -284,6 +271,10 @@ class DeepSeekClient:
 
                 print(f"[AIClient] 第 {attempt}/{max_retries} 次嘗試失敗（解析錯誤）")
 
+            except openai.APIConnectionError as e:
+                print(f"[AIClient] 第 {attempt}/{max_retries} 次連線異常: {e}")
+            except openai.APIStatusError as e:
+                print(f"[AIClient] 第 {attempt}/{max_retries} 次 HTTP 狀態錯誤 ({e.status_code}): {e.message}")
             except Exception as e:
                 print(f"[AIClient] 第 {attempt}/{max_retries} 次嘗試異常: {type(e).__name__}: {e}")
 
@@ -295,3 +286,8 @@ class DeepSeekClient:
         for client in self._clients.values():
             client.close()
         self._clients.clear()
+
+
+# 向下相容別名
+DeepSeekClient = NewApiClient
+
