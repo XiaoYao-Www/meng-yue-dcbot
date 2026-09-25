@@ -8,12 +8,32 @@
 """
 import asyncio
 import json
-from typing import Dict, Optional
+from datetime import datetime
+from typing import Dict, Optional, Tuple, Any
 
 import openai
 from json_repair import repair_json
 
-from config import AI_PROFILES, DAILY_AI_MAX_RETRIES
+from config import (
+    AI_PROFILES, DAILY_AI_MAX_RETRIES,
+    AI_DAILY_MAX_TOKENS, AI_DAILY_MAX_CALLS, TZ,
+)
+from database.ai_usage_db import aiUsageDB
+
+
+class AIQuotaExceededError(Exception):
+    """### 當每日 AI Token 或呼叫次數達到上限時拋出的基底例外"""
+    def __init__(self, message: str, policy: str = "drop"):
+        super().__init__(message)
+        self.message = message
+        self.policy = policy
+
+
+class AIQuotaPostponedError(AIQuotaExceededError):
+    """### 當每日 AI 用量超額且任務策略為 postpone 時拋出"""
+    def __init__(self, message: str):
+        super().__init__(message, policy="postpone")
+
 
 
 def build_request_kwargs(
@@ -187,24 +207,36 @@ class NewApiClient:
         max_tokens: int = 2048,
         use_json_mode: bool = True,
         temperature: float = 0.7,
+        on_quota_exceeded: str = "drop",
     ) -> Optional[Dict[str, str]]:
-        """### 依指定配置呼叫 AI 生成內容（含自動重試 + 漸進式降級）
-
-        策略：
-        1. 依 AI_PROFILES 配置決定 model / base_url / 思考模式與強度
-        2. 優先嘗試 JSON Mode（response_format），若返回空 content 頁面立即回退一般模式
-        3. 思考禁用時每次重試降低 temperature，提高輸出確定性
+        """### 依指定配置呼叫 AI 生成內容（含用量限制 + 自動重試 + 漸進式降級）
 
         Args:
             prompt: 提示詞
             profile_name: AI_PROFILES 中的配置名稱
             max_tokens: 最大 token 數
             use_json_mode: 是否優先使用 JSON Mode
-            temperature: 初始 temperature（僅思考禁用時生效，重試時逐步降低）
+            temperature: 初始 temperature
+            on_quota_exceeded: 每日用量達到上限時的處理策略：
+                - "drop" (預設): 直接攔截並丟棄請求，拋出 AIQuotaExceededError
+                - "postpone": 暫緩任務直至隔天，拋出 AIQuotaPostponedError
 
         Returns:
             解析後的 dict 或 None
         """
+        # 1. 前置每日用量檢查
+        today_str = datetime.now(TZ).strftime("%Y-%m-%d")
+        exceeded, reason = await aiUsageDB.check_quota_exceeded(
+            today_str, AI_DAILY_MAX_TOKENS, AI_DAILY_MAX_CALLS
+        )
+        if exceeded:
+            if on_quota_exceeded == "postpone":
+                print(f"[AIClient] ⏸️ 每日 AI 用量已達上限 ({reason})，任務策略為 postpone（已自動暫緩至隔日）")
+                raise AIQuotaPostponedError(reason)
+            else:
+                print(f"[AIClient] ⛔ 每日 AI 用量已達上限 ({reason})，任務策略為 drop（已直接放棄請求）")
+                raise AIQuotaExceededError(reason, policy="drop")
+
         profile = AI_PROFILES.get(profile_name)
         if profile is None:
             print(f"[AIClient] AI 配置「{profile_name}」不存在於 AI_PROFILES")
@@ -226,7 +258,7 @@ class NewApiClient:
             try_json = use_json_mode and attempt == 1
 
             try:
-                def _sync_call() -> str:
+                def _sync_call() -> Tuple[str, Any]:
                     kwargs = build_request_kwargs(
                         model=model,
                         reasoning_effort=reasoning_effort,
@@ -254,9 +286,20 @@ class NewApiClient:
                     if not content:
                         print(f"[AIClient] API 回傳空內容！finish_reason={finish} usage=({usage_str})")
 
-                    return content
+                    return content, usage
 
-                text = await asyncio.to_thread(_sync_call)
+                text, usage = await asyncio.to_thread(_sync_call)
+
+                # 記錄用量
+                if usage:
+                    p_tokens = getattr(usage, "prompt_tokens", 0) or 0
+                    c_tokens = getattr(usage, "completion_tokens", 0) or 0
+                    rec = await aiUsageDB.record_usage(today_str, p_tokens, c_tokens)
+                    print(
+                        f"[AIClient] 用量紀錄 ({today_str}): 呼叫第 {rec['call_count']} 次 | "
+                        f"Tokens: 今日總計 {rec['total_tokens']} (本次 +{p_tokens + c_tokens})"
+                    )
+
                 if not text:
                     # 空內容：若為 JSON Mode 則直接視為該模式不支援，下次不再嘗試
                     print(f"[AIClient] 第 {attempt}/{max_retries} 次嘗試回傳空內容")

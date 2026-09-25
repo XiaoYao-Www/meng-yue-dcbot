@@ -69,6 +69,12 @@ STOCK_MIN_LIMIT: int = 3           # 庫存下限（低於此數量時觸發自�
 STOCK_MAX_LIMIT: int = 10          # 庫存上限（自動補充至此數量）
 
 
+# ── AI 每日用量限制配置 (0 代表不限制) ──
+
+AI_DAILY_MAX_TOKENS: int = 100000   # 每日 Token 用量上限 (含 Prompt + Completion)
+AI_DAILY_MAX_CALLS: int = 100       # 每日 API 呼叫次數上限
+
+
 # ── 每日學習 AI 重試 ──
 
 DAILY_AI_MAX_RETRIES: int = 3               # API 呼叫失敗/回傳錯誤時的最大重試次數

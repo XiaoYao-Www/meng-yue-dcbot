@@ -10,6 +10,7 @@ from config import DISCORD_TOKEN, GUILD_ID, DB_PATH
 from database.user_base_db import userBaseDB
 from database.role_db import roleConfigDB
 from database.daily_content_db import dailyContentDB
+from database.ai_usage_db import aiUsageDB
 from utils.article_exporter import export_all_history
 
 
@@ -111,6 +112,7 @@ class MyBot(commands.Bot):
         await userBaseDB.close()
         await roleConfigDB.close()
         await dailyContentDB.close()
+        await aiUsageDB.close()
         print("🔄 資料庫連線已關閉")
         await super().close()
 
@@ -133,6 +135,8 @@ async def on_ready():
         await roleConfigDB.setup()
         await dailyContentDB.connect()
         await dailyContentDB.setup()
+        await aiUsageDB.connect()
+        await aiUsageDB.setup()
         # 啟動時自動匯出遺漏的歷史文章
         await export_all_history(dailyContentDB)
 

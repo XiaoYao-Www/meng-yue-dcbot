@@ -16,7 +16,7 @@ from config import (
     DAILY_ARTICLES_PER_DAY, STOCK_MIN_LIMIT, STOCK_MAX_LIMIT,
 )
 from database.daily_content_db import dailyContentDB
-from utils.ai_client import NewApiClient
+from utils.ai_client import NewApiClient, AIQuotaExceededError, AIQuotaPostponedError
 from utils.article_exporter import save_article_md
 
 
@@ -224,6 +224,7 @@ class DailyMessageEvent(commands.Cog):
             profile_name=DAILY_GENERATION_PROFILE,
             max_tokens=DAILY_GENERATION_MAX_TOKENS,
             use_json_mode=False,
+            on_quota_exceeded="postpone",
         )
 
         if result is None:
@@ -279,6 +280,7 @@ class DailyMessageEvent(commands.Cog):
             profile_name=profile_name,
             max_tokens=DAILY_VERIFICATION_MAX_TOKENS,
             use_json_mode=False,
+            on_quota_exceeded="postpone",
         )
 
         if v is None:
@@ -445,6 +447,12 @@ class DailyMessageEvent(commands.Cog):
                 print(f"[DailyMessage] 已成功加入庫存 ({i + 1}/{needed})：{article['section_title']}")
 
             print(f"[DailyMessage] 庫存補充完成，成功新增 {added} 篇，現有庫存 {await dailyContentDB.get_stock_count()} 篇")
+            return added
+        except AIQuotaPostponedError as e:
+            print(f"[DailyMessage] ⏸️ 每日 AI 用量已達上限，庫存補充任務已自動暫緩（{e}），將於隔日 00:00 恢復處理")
+            return added
+        except AIQuotaExceededError as e:
+            print(f"[DailyMessage] ⛔ 每日 AI 用量已達上限，庫存補充任務已中斷（{e}）")
             return added
         except Exception as e:
             print(f"[DailyMessage] 庫存補充處理異常: {e}")
