@@ -74,9 +74,13 @@ async def load_folder(folder_path: str) -> None:
 
 ##### 機器人設定 #####
 
+import gc
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.presences = False  # 關閉在線狀態快取以大幅節省記憶體
+intents.typing = False     # 關閉打字狀態事件
 
 class MyBot(commands.Bot):
     async def setup_hook(self):
@@ -116,7 +120,13 @@ class MyBot(commands.Bot):
         print("🔄 資料庫連線已關閉")
         await super().close()
 
-bot: MyBot = MyBot(command_prefix="!", intents=intents)
+# 記憶體優化：限制訊息快取上限為 50（預設 1000 會佔用巨量記憶體），並關閉啟動時全伺服器成員全量預載 (chunk)
+bot: MyBot = MyBot(
+    command_prefix="!",
+    intents=intents,
+    max_messages=50,
+    chunk_guilds_at_startup=False,
+)
 
 ##### 機器人啟動 #####
 
@@ -141,6 +151,7 @@ async def on_ready():
         await export_all_history(dailyContentDB)
 
         # 啟動完成
+        gc.collect()
         print(f"{bot.user} 已上線！")
     except Exception as e:
         print(f"❌ on_ready 資料庫初始化失敗: {e}")

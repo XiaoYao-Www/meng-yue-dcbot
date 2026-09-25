@@ -134,23 +134,27 @@ def pick_daily_word(exclude_words: Optional[Set[str]] = None, date_str: str = ""
         完整的單字資訊 dict，若皆無可用詞則回傳 None
     """
     exclude = {w.lower() for w in (exclude_words or set())}
-    available_words = [w for w in HIGH_FREQUENCY_WORDS if w.lower() not in exclude]
-
-    if not available_words:
-        # 若高頻單字皆已發布過一次，重置循環（排除當日除外）
-        available_words = list(HIGH_FREQUENCY_WORDS)
+    total_words = len(HIGH_FREQUENCY_WORDS)
 
     # 依日期產生確定性哈希種子
     seed_str = date_str or "default_seed"
     seed_hash = int(hashlib.md5(seed_str.encode("utf-8")).hexdigest(), 16)
-    start_index = seed_hash % len(available_words)
+    start_index = seed_hash % total_words
 
-    # 從計算出的索引開始巡迴，尋找第一個在資料庫中有資料的單字
-    total = len(available_words)
-    for i in range(total):
-        candidate = available_words[(start_index + i) % total]
+    # 直接依種子索引巡迴，避免每次建立複製一份 2500+ 單字的大清單
+    for i in range(total_words):
+        candidate = HIGH_FREQUENCY_WORDS[(start_index + i) % total_words]
+        if candidate.lower() in exclude:
+            continue
         details = query_word(candidate)
-        if details and details["senses"]:
+        if details and details.get("senses"):
+            return details
+
+    # 若全數已用過（極長週期後），隨機選取未在當日重複的第一個
+    for i in range(total_words):
+        candidate = HIGH_FREQUENCY_WORDS[(start_index + i) % total_words]
+        details = query_word(candidate)
+        if details and details.get("senses"):
             return details
 
     return None

@@ -138,6 +138,7 @@ class DailyMessageEvent(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._ai = NewApiClient(NEW_API_KEY) if NEW_API_KEY else None
+        self._replenish_lock = asyncio.Lock()  # 庫存補充專用鎖，防止並發重複執行浪費 Token
         self.daily_message_task.start()
 
     def cog_unload(self):
@@ -423,53 +424,58 @@ class DailyMessageEvent(commands.Cog):
         逐篇執行生成 + 兩段式驗證，並存入庫存庫 (status='stock')。
         去重提示詞包含資料庫中所有已發送與庫存文章標題。
         """
-        try:
-            current_stock = await dailyContentDB.get_stock_count()
-            if current_stock >= STOCK_MIN_LIMIT:
-                print(f"[DailyMessage] 目前庫存 {current_stock} 篇（≥ 下限 {STOCK_MIN_LIMIT} 篇），無需補充")
-                return 0
-
-            needed = STOCK_MAX_LIMIT - current_stock
-            print(f"[DailyMessage] 目前庫存 {current_stock} 篇（< 下限 {STOCK_MIN_LIMIT} 篇），開始補充 {needed} 篇至上限 {STOCK_MAX_LIMIT} 篇...")
-
-            added = 0
-            for i in range(needed):
-                # 取得全部歷史 + 庫存內容，進行 Prompt 全量去重
-                all_contents = await dailyContentDB.get_all_contents()
-                history = [dict(row) for row in all_contents]
-
-                article = await self._generate_and_verify_article(history, forbidden_topics="")
-                if article is None:
-                    print(f"[DailyMessage] 庫存補充第 {i + 1}/{needed} 篇生成失敗（重試耗盡），中斷補充")
-                    break
-
-                now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-                await dailyContentDB.add_stock_content(
-                    section_type=article["section_type"],
-                    section_title=article["section_title"],
-                    section_summary=article["section_summary"],
-                    section_detail=article["section_detail"],
-                    section_quick_learn=article["section_quick_learn"],
-                    section_sources=article["section_sources"],
-                    section_credibility=article["section_credibility"],
-                    generated_at=now_str,
-                    verified_at=article["verified_at"],
-                    verification_notes=article["verification_notes"],
-                )
-                added += 1
-                print(f"[DailyMessage] 已成功加入庫存 ({i + 1}/{needed})：{article['section_title']}")
-
-            print(f"[DailyMessage] 庫存補充完成，成功新增 {added} 篇，現有庫存 {await dailyContentDB.get_stock_count()} 篇")
-            return added
-        except AIQuotaPostponedError as e:
-            print(f"[DailyMessage] ⏸️ 每日 AI 用量已達上限，庫存補充任務已自動暫緩（{e}），將於隔日 00:00 恢復處理")
-            return added
-        except AIQuotaExceededError as e:
-            print(f"[DailyMessage] ⛔ 每日 AI 用量已達上限，庫存補充任務已中斷（{e}）")
-            return added
-        except Exception as e:
-            print(f"[DailyMessage] 庫存補充處理異常: {e}")
+        if self._replenish_lock.locked():
+            print("[DailyMessage] 庫存補充任務已在執行中，跳過重複觸發")
             return 0
+
+        async with self._replenish_lock:
+            try:
+                current_stock = await dailyContentDB.get_stock_count()
+                if current_stock >= STOCK_MIN_LIMIT:
+                    print(f"[DailyMessage] 目前庫存 {current_stock} 篇（≥ 下限 {STOCK_MIN_LIMIT} 篇），無需補充")
+                    return 0
+
+                needed = STOCK_MAX_LIMIT - current_stock
+                print(f"[DailyMessage] 目前庫存 {current_stock} 篇（< 下限 {STOCK_MIN_LIMIT} 篇），開始補充 {needed} 篇至上限 {STOCK_MAX_LIMIT} 篇...")
+
+                added = 0
+                for i in range(needed):
+                    # 取得全部歷史 + 庫存內容，進行 Prompt 全量去重
+                    all_contents = await dailyContentDB.get_all_contents()
+                    history = [dict(row) for row in all_contents]
+
+                    article = await self._generate_and_verify_article(history, forbidden_topics="")
+                    if article is None:
+                        print(f"[DailyMessage] 庫存補充第 {i + 1}/{needed} 篇生成失敗（重試耗盡），中斷補充")
+                        break
+
+                    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+                    await dailyContentDB.add_stock_content(
+                        section_type=article["section_type"],
+                        section_title=article["section_title"],
+                        section_summary=article["section_summary"],
+                        section_detail=article["section_detail"],
+                        section_quick_learn=article["section_quick_learn"],
+                        section_sources=article["section_sources"],
+                        section_credibility=article["section_credibility"],
+                        generated_at=now_str,
+                        verified_at=article["verified_at"],
+                        verification_notes=article["verification_notes"],
+                    )
+                    added += 1
+                    print(f"[DailyMessage] 已成功加入庫存 ({i + 1}/{needed})：{article['section_title']}")
+
+                print(f"[DailyMessage] 庫存補充完成，成功新增 {added} 篇，現有庫存 {await dailyContentDB.get_stock_count()} 篇")
+                return added
+            except AIQuotaPostponedError as e:
+                print(f"[DailyMessage] ⏸️ 每日 AI 用量已達上限，庫存補充任務已自動暫緩（{e}），將於隔日 00:00 恢復處理")
+                return added
+            except AIQuotaExceededError as e:
+                print(f"[DailyMessage] ⛔ 每日 AI 用量已達上限，庫存補充任務已中斷（{e}）")
+                return added
+            except Exception as e:
+                print(f"[DailyMessage] 庫存補充處理異常: {e}")
+                return 0
 
     @tasks.loop(time=DAILY_MESSAGE_TIME)
     async def daily_message_task(self):

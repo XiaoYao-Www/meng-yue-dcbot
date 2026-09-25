@@ -31,6 +31,9 @@ class RoleConfigDatabase:
         # 開啟 WAL 模式與 NORMAL 同步，降低磁碟 IO 等待
         await self.db.execute("PRAGMA journal_mode=WAL")
         await self.db.execute("PRAGMA synchronous=NORMAL")
+        # 記憶體調優：限制連線頁面快取為 1MB，禁用大檔案記憶體映射
+        await self.db.execute("PRAGMA cache_size = -1024")
+        await self.db.execute("PRAGMA mmap_size = 0")
 
     async def close(self) -> None:
         """在應用關閉時呼叫"""

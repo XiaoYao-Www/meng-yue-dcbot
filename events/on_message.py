@@ -7,57 +7,47 @@ from database.user_base_db import userBaseDB
 from config import MAX_MESSAGE_REPUTATION
 
 
+# 預編譯正規表達式，避免高頻訊息重覆配置編譯物件與字串
+URL_PATTERN = re.compile(r'https?://\S+')
+CUSTOM_EMOJI_PATTERN = re.compile(r'<a?:\w+:\d+>')
+MENTION_USER_PATTERN = re.compile(r'<@!?\d+>')
+MENTION_ROLE_PATTERN = re.compile(r'<@&\d+>')
+MENTION_CHANNEL_PATTERN = re.compile(r'<#\d+>')
+MARKDOWN_PATTERN = re.compile(r'[*_~`]')
+ZERO_WIDTH_CHARS = ('\u200b', '\u200c', '\u200d', '\uFEFF', '\n', '\t', '\r')
+
 def count_readable_chars(message: Message) -> int:
-    """計算可讀字元數
-
-    Args:
-        message (Message): 訊息
-
-    Returns:
-        int: 自數
-    """
+    """計算可讀字元數（預編譯高效版）"""
     text = message.content
 
     # 1. 去除零寬字符
-    zero_width_chars = ['\u200b', '\u200c', '\u200d', '\uFEFF', '\n', '\t', '\r']
-    for zw in zero_width_chars:
+    for zw in ZERO_WIDTH_CHARS:
         text = text.replace(zw, ' ')
 
-    # 2. 替換連結
-    text = re.sub(r'https?://\S+', 'U', text)
+    # 2. 替換連結、表情、mentions（使用預編譯 regex）
+    text = URL_PATTERN.sub('U', text)
+    text = CUSTOM_EMOJI_PATTERN.sub('E', text)
+    text = MENTION_USER_PATTERN.sub('M', text)
+    text = MENTION_ROLE_PATTERN.sub('R', text)
+    text = MENTION_CHANNEL_PATTERN.sub('C', text)
 
-    # 3. 替換自訂表情
-    text = re.sub(r'<a?:\w+:\d+>', 'E', text)
+    # 3. 替換 Discord stickers
+    if getattr(message, "stickers", None):
+        text += 'S' * len(message.stickers)
 
-    # 4. 替換 mentions
-    text = re.sub(r'<@!?\d+>', 'M', text)   # 使用者
-    text = re.sub(r'<@&\d+>', 'R', text)    # 角色
-    text = re.sub(r'<#\d+>', 'C', text)     # 頻道
-
-    # 5. 替換 Discord stickers (如果有)
-    if hasattr(message, "stickers"):
-        for _ in message.stickers:
-            text += 'S'
-
-    # 6. 替換 emoji
+    # 4. 替換 emoji
     text = emoji.replace_emoji(text, replace='E')
 
-    # 7. 去掉 Markdown 符號 (*, _, ~, `)
-    text = re.sub(r'[*_~`]', '', text)
+    # 5. 去掉 Markdown 符號
+    text = MARKDOWN_PATTERN.sub('', text)
 
-    # 8. 附件算 1 個
-    if hasattr(message, "attachments"):
-        for _ in message.attachments:
-            text += 'A'
+    # 6. 附件算 1 個
+    if getattr(message, "attachments", None):
+        text += 'A' * len(message.attachments)
 
-    # 9. 正規化文字（避免全形、組合字膨脹）
-    text = unicodedata.normalize('NFC', text)
+    # 7. 正規化文字
+    text = unicodedata.normalize('NFC', text).strip().replace(' ', '')
 
-    text = text.strip()
-    
-    text = text.replace(' ', '')
-
-    # 最終可讀字數
     return len(text)
 
 

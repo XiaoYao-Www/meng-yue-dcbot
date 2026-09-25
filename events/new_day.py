@@ -30,6 +30,10 @@ class NewDayEvent(commands.Cog):
             if cog and hasattr(cog, "run_full_scan"):
                 await cog.run_full_scan()
 
+            # 3. 每日任務完成後執行系統記憶體垃圾回收
+            import gc
+            gc.collect()
+
         except Exception as e:
             print(f"❌ 執行每日任務失敗: {e}")
 

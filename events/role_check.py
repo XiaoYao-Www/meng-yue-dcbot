@@ -113,11 +113,14 @@ class RoleCheckEvent(commands.Cog):
         if not configs:
             return
 
+        import gc
         for guild in self.bot.guilds:
             try:
                 await self._check_guild(guild, configs)
             except Exception as e:
                 print(f"❌ 身分組完整掃描失敗 (Guild {guild.id}): {e}")
+        # 掃描完成後主動進行垃圾回收，釋放成員暫存物件
+        gc.collect()
 
     ##### 定時任務 #####
 
@@ -147,10 +150,13 @@ class RoleCheckEvent(commands.Cog):
             print(f"[RoleCheck] 無法取得使用者資料: {e}")
             return
 
+        # 僅快取資料庫中存在的有效使用者，避免大型伺服器數千成員物件塞爆記憶體
+        target_ids = {u["user_id"] for u in users_data}
         member_cache: dict[int, discord.Member] = {}
         try:
             async for member in guild.fetch_members():
-                member_cache[member.id] = member
+                if member.id in target_ids:
+                    member_cache[member.id] = member
         except discord.Forbidden:
             print(f"[RoleCheck] 缺少讀取成員列表權限 (Guild {guild.id})")
             return

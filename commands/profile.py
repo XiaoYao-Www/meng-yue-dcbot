@@ -36,8 +36,11 @@ class ProfileCommand(commands.Cog):
         except Exception as e:
             print(f"❌ profile 指令錯誤: {e}")
             try:
-                await interaction.response.send_message("❌ 查詢失敗，請稍後再試。", ephemeral=True)
-            except:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("❌ 查詢失敗，請稍後再試。", ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ 查詢失敗，請稍後再試。", ephemeral=True)
+            except Exception:
                 pass
 
 async def setup(bot: commands.Bot):
