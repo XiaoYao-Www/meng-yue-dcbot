@@ -1,6 +1,6 @@
 [project]
 name = "meng-yue"
-version = "0.2.10"
+version = "0.2.11"
 description = "Discord 多功能社群與每日知識單字 Bot"
 authors = [
     {name = "逍遙"}
