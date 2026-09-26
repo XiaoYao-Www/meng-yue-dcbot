@@ -104,7 +104,7 @@ class DailyContentDatabase:
                     await self.db.execute("ALTER TABLE daily_content RENAME TO daily_content_old")
                     await self.db.commit()
 
-            # 建立新表：一篇一筆，同一天可有多筆（date 與 status 建索引）
+            # 建立新表：一篇一筆，同一天可有多筆
             await self.db.execute("""
                 CREATE TABLE IF NOT EXISTS daily_content (
                     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,6 +122,18 @@ class DailyContentDatabase:
                     status                TEXT NOT NULL DEFAULT 'published'
                 )
             """)
+
+            # 先檢查並動態補充欄位（確保既有舊資料庫先完成欄位升級，再建立索引）
+            col_cursor = await self.db.execute("PRAGMA table_info(daily_content)")
+            columns = [row[1] async for row in col_cursor]
+            if "status" not in columns:
+                print("[DailyContentDB] 補全 status 欄位 (預設 'published')...")
+                await self.db.execute("ALTER TABLE daily_content ADD COLUMN status TEXT NOT NULL DEFAULT 'published'")
+            if "section_quick_learn" not in columns:
+                print("[DailyContentDB] 補全 section_quick_learn 欄位...")
+                await self.db.execute("ALTER TABLE daily_content ADD COLUMN section_quick_learn TEXT NOT NULL DEFAULT ''")
+
+            # 欄位確保存在後，再建立索引
             await self.db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_daily_content_date ON daily_content(date)"
             )
@@ -143,15 +155,6 @@ class DailyContentDatabase:
                 "CREATE INDEX IF NOT EXISTS idx_daily_words_date ON daily_words(date)"
             )
             await self.db.commit()
-
-            # 檢查並動態補充 status 欄位（針對已存在的單篇 schema 舊資料庫）
-            col_cursor = await self.db.execute("PRAGMA table_info(daily_content)")
-            columns = [row[1] async for row in col_cursor]
-            if "status" not in columns:
-                print("[DailyContentDB] 補全 status 欄位 (預設 'published')...")
-                await self.db.execute("ALTER TABLE daily_content ADD COLUMN status TEXT NOT NULL DEFAULT 'published'")
-                await self.db.execute("CREATE INDEX IF NOT EXISTS idx_daily_content_status ON daily_content(status)")
-                await self.db.commit()
 
             if needs_legacy_split:
                 await self._migrate_legacy_rows()
